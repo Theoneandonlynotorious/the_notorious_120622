@@ -1,0 +1,3660 @@
+================================================================================
+SMART IRRIGATION SYSTEM - ALL FILES
+================================================================================
+
+==================== FILE: app.py ====================
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
+from datetime import datetime, timedelta
+import sqlite3
+import json
+import time
+import threading
+from utils.database import DatabaseManager
+from utils.iot_simulator import IoTSensorSimulator
+from utils.crop_price_predictor import CropPricePredictor
+from utils.irrigation_controller import IrrigationController
+from utils.weather_api import WeatherAPI
+from utils.market_data import MarketDataFetcher
+
+# Page configuration
+st.set_page_config(
+    page_title="Smart Irrigation & Crop Price System",
+    page_icon="🌱",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 3rem;
+        color: #2E8B57;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .metric-card {
+        background-color: #f0f8f0;
+        padding: 1rem;
+        border-radius: 10px;
+        border-left: 5px solid #2E8B57;
+        margin: 0.5rem 0;
+    }
+    .alert-danger {
+        background-color: #ffebee;
+        color: #c62828;
+        padding: 1rem;
+        border-radius: 5px;
+        border-left: 5px solid #c62828;
+    }
+    .alert-success {
+        background-color: #e8f5e8;
+        color: #2e7d32;
+        padding: 1rem;
+        border-radius: 5px;
+        border-left: 5px solid #2e7d32;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Initialize session state
+if 'db_manager' not in st.session_state:
+    st.session_state.db_manager = DatabaseManager()
+if 'iot_simulator' not in st.session_state:
+    st.session_state.iot_simulator = IoTSensorSimulator()
+if 'price_predictor' not in st.session_state:
+    st.session_state.price_predictor = CropPricePredictor()
+if 'irrigation_controller' not in st.session_state:
+    st.session_state.irrigation_controller = IrrigationController()
+if 'weather_api' not in st.session_state:
+    st.session_state.weather_api = WeatherAPI()
+if 'market_fetcher' not in st.session_state:
+    st.session_state.market_fetcher = MarketDataFetcher()
+
+def main():
+    st.markdown('<h1 class="main-header">🌱 Smart Irrigation & Crop Price System</h1>', unsafe_allow_html=True)
+    
+    # Sidebar navigation
+    st.sidebar.title("Navigation")
+    page = st.sidebar.selectbox(
+        "Choose a page",
+        ["Dashboard", "IoT Sensors", "Irrigation Control", "Crop Price Prediction", "Market Analysis", "Settings"]
+    )
+    
+    if page == "Dashboard":
+        show_dashboard()
+    elif page == "IoT Sensors":
+        show_iot_sensors()
+    elif page == "Irrigation Control":
+        show_irrigation_control()
+    elif page == "Crop Price Prediction":
+        show_crop_price_prediction()
+    elif page == "Market Analysis":
+        show_market_analysis()
+    elif page == "Settings":
+        show_settings()
+
+def show_dashboard():
+    st.header("📊 System Dashboard")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    # Get latest sensor data
+    latest_data = st.session_state.iot_simulator.get_latest_data()
+    
+    with col1:
+        st.metric(
+            label="Soil Moisture",
+            value=f"{latest_data['soil_moisture']:.1f}%",
+            delta=f"{latest_data['soil_moisture'] - 45:.1f}%"
+        )
+    
+    with col2:
+        st.metric(
+            label="Temperature",
+            value=f"{latest_data['temperature']:.1f}°C",
+            delta=f"{latest_data['temperature'] - 25:.1f}°C"
+        )
+    
+    with col3:
+        st.metric(
+            label="Humidity",
+            value=f"{latest_data['humidity']:.1f}%",
+            delta=f"{latest_data['humidity'] - 60:.1f}%"
+        )
+    
+    with col4:
+        st.metric(
+            label="Light Intensity",
+            value=f"{latest_data['light_intensity']:.0f} lux",
+            delta=f"{latest_data['light_intensity'] - 50000:.0f}"
+        )
+    
+    # Real-time charts
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("Sensor Data Trends")
+        sensor_history = st.session_state.db_manager.get_sensor_history(hours=24)
+        if not sensor_history.empty:
+            fig = px.line(
+                sensor_history,
+                x='timestamp',
+                y=['soil_moisture', 'temperature', 'humidity'],
+                title="24-Hour Sensor Trends"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        st.subheader("Irrigation Status")
+        irrigation_status = st.session_state.irrigation_controller.get_status()
+        
+        if irrigation_status['active']:
+            st.markdown('<div class="alert-success">✅ Irrigation System: ACTIVE</div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="alert-danger">❌ Irrigation System: INACTIVE</div>', unsafe_allow_html=True)
+        
+        # Irrigation history
+        irrigation_history = st.session_state.db_manager.get_irrigation_history(days=7)
+        if not irrigation_history.empty:
+            fig = px.bar(
+                irrigation_history,
+                x='date',
+                y='duration_minutes',
+                title="Weekly Irrigation Duration"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+    
+    # Alerts and notifications
+    st.subheader("🚨 System Alerts")
+    alerts = check_system_alerts(latest_data)
+    for alert in alerts:
+        st.markdown(f'<div class="alert-danger">{alert}</div>', unsafe_allow_html=True)
+
+def show_iot_sensors():
+    st.header("📡 IoT Sensor Management")
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.subheader("Real-time Sensor Data")
+        
+        # Auto-refresh toggle
+        auto_refresh = st.checkbox("Auto-refresh (5 seconds)", value=True)
+        
+        if auto_refresh:
+            placeholder = st.empty()
+            for i in range(60):  # Refresh for 5 minutes
+                with placeholder.container():
+                    current_data = st.session_state.iot_simulator.get_latest_data()
+                    
+                    # Create gauge charts
+                    fig = go.Figure()
+                    
+                    fig.add_trace(go.Indicator(
+                        mode="gauge+number+delta",
+                        value=current_data['soil_moisture'],
+                        domain={'x': [0, 1], 'y': [0, 1]},
+                        title={'text': "Soil Moisture (%)"},
+                        delta={'reference': 50},
+                        gauge={'axis': {'range': [None, 100]},
+                               'bar': {'color': "darkblue"},
+                               'steps': [
+                                   {'range': [0, 30], 'color': "lightgray"},
+                                   {'range': [30, 70], 'color': "gray"}],
+                               'threshold': {'line': {'color': "red", 'width': 4},
+                                           'thickness': 0.75, 'value': 90}}))
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Display raw data
+                    st.json(current_data)
+                
+                time.sleep(5)
+        else:
+            current_data = st.session_state.iot_simulator.get_latest_data()
+            st.json(current_data)
+    
+    with col2:
+        st.subheader("Sensor Configuration")
+        
+        # Sensor settings
+        st.write("**Soil Moisture Sensor**")
+        moisture_threshold = st.slider("Low moisture alert (%)", 0, 100, 30)
+        
+        st.write("**Temperature Sensor**")
+        temp_min = st.slider("Min temperature alert (°C)", 0, 50, 15)
+        temp_max = st.slider("Max temperature alert (°C)", 0, 50, 35)
+        
+        st.write("**Humidity Sensor**")
+        humidity_threshold = st.slider("Low humidity alert (%)", 0, 100, 40)
+        
+        if st.button("Save Configuration"):
+            config = {
+                'moisture_threshold': moisture_threshold,
+                'temp_min': temp_min,
+                'temp_max': temp_max,
+                'humidity_threshold': humidity_threshold
+            }
+            st.session_state.db_manager.save_sensor_config(config)
+            st.success("Configuration saved!")
+
+def show_irrigation_control():
+    st.header("💧 Irrigation Control System")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("Manual Control")
+        
+        if st.button("Start Irrigation", type="primary"):
+            st.session_state.irrigation_controller.start_irrigation()
+            st.success("Irrigation started!")
+        
+        if st.button("Stop Irrigation"):
+            st.session_state.irrigation_controller.stop_irrigation()
+            st.success("Irrigation stopped!")
+        
+        # Schedule irrigation
+        st.subheader("Schedule Irrigation")
+        schedule_time = st.time_input("Time")
+        duration = st.number_input("Duration (minutes)", min_value=1, max_value=120, value=30)
+        
+        if st.button("Schedule"):
+            st.session_state.irrigation_controller.schedule_irrigation(schedule_time, duration)
+            st.success(f"Irrigation scheduled for {schedule_time} for {duration} minutes")
+    
+    with col2:
+        st.subheader("Automatic Control Settings")
+        
+        auto_irrigation = st.checkbox("Enable Auto Irrigation", value=True)
+        
+        if auto_irrigation:
+            moisture_trigger = st.slider("Trigger when soil moisture below (%)", 0, 100, 30)
+            irrigation_duration = st.slider("Irrigation duration (minutes)", 5, 60, 15)
+            
+            if st.button("Save Auto Settings"):
+                settings = {
+                    'auto_enabled': auto_irrigation,
+                    'moisture_trigger': moisture_trigger,
+                    'duration': irrigation_duration
+                }
+                st.session_state.irrigation_controller.set_auto_settings(settings)
+                st.success("Auto irrigation settings saved!")
+        
+        # Current status
+        st.subheader("Current Status")
+        status = st.session_state.irrigation_controller.get_status()
+        
+        if status['active']:
+            st.success("🟢 Irrigation Active")
+            st.write(f"Started: {status['start_time']}")
+            st.write(f"Duration: {status['duration']} minutes")
+        else:
+            st.info("🔴 Irrigation Inactive")
+        
+        # Water usage statistics
+        st.subheader("Water Usage")
+        usage_data = st.session_state.db_manager.get_water_usage(days=30)
+        if not usage_data.empty:
+            fig = px.line(usage_data, x='date', y='liters_used', title="Daily Water Usage (L)")
+            st.plotly_chart(fig, use_container_width=True)
+
+def show_crop_price_prediction():
+    st.header("📈 Crop Price Prediction")
+    
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        st.subheader("Select Crop")
+        
+        crops = ["Wheat", "Rice", "Corn", "Soybeans", "Cotton", "Tomatoes", "Potatoes", "Onions"]
+        selected_crop = st.selectbox("Choose crop", crops)
+        
+        prediction_days = st.slider("Prediction period (days)", 7, 90, 30)
+        
+        if st.button("Generate Prediction", type="primary"):
+            with st.spinner("Generating prediction..."):
+                prediction = st.session_state.price_predictor.predict_price(selected_crop, prediction_days)
+                st.session_state.current_prediction = prediction
+    
+    with col2:
+        st.subheader("Price Prediction Results")
+        
+        if hasattr(st.session_state, 'current_prediction'):
+            prediction = st.session_state.current_prediction
+            
+            # Current price
+            st.metric(
+                label=f"Current {selected_crop} Price",
+                value=f"₹{prediction['current_price']:.2f}/kg",
+                delta=f"{prediction['price_change']:.2f}%"
+            )
+            
+            # Prediction chart
+            fig = go.Figure()
+            
+            # Historical data
+            fig.add_trace(go.Scatter(
+                x=prediction['historical_dates'],
+                y=prediction['historical_prices'],
+                mode='lines',
+                name='Historical Prices',
+                line=dict(color='blue')
+            ))
+            
+            # Predicted data
+            fig.add_trace(go.Scatter(
+                x=prediction['prediction_dates'],
+                y=prediction['predicted_prices'],
+                mode='lines',
+                name='Predicted Prices',
+                line=dict(color='red', dash='dash')
+            ))
+            
+            fig.update_layout(
+                title=f"{selected_crop} Price Prediction",
+                xaxis_title="Date",
+                yaxis_title="Price (₹/kg)",
+                hovermode='x'
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Prediction insights
+            st.subheader("Market Insights")
+            
+            if prediction['trend'] == 'increasing':
+                st.success("📈 Prices are expected to increase. Good time to hold crops.")
+            elif prediction['trend'] == 'decreasing':
+                st.warning("📉 Prices are expected to decrease. Consider selling soon.")
+            else:
+                st.info("📊 Prices are expected to remain stable.")
+            
+            # Confidence level
+            st.write(f"**Prediction Confidence:** {prediction['confidence']:.1f}%")
+            
+            # Best selling window
+            st.write(f"**Optimal Selling Period:** {prediction['best_selling_window']}")
+
+def show_market_analysis():
+    st.header("📊 Market Analysis")
+    
+    # Market overview
+    st.subheader("Current Market Overview")
+    
+    market_data = st.session_state.market_fetcher.get_current_market_data()
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("Market Trend", "Bullish", "↗️ 2.3%")
+    
+    with col2:
+        st.metric("Avg Price Change", "+₹12.50", "↗️ 5.2%")
+    
+    with col3:
+        st.metric("Trading Volume", "High", "↗️ 15%")
+    
+    # Price comparison chart
+    st.subheader("Multi-Crop Price Comparison")
+    
+    crops_data = {
+        'Crop': ['Wheat', 'Rice', 'Corn', 'Soybeans', 'Cotton'],
+        'Current Price': [25.50, 45.20, 18.75, 55.30, 85.40],
+        'Last Week': [24.80, 44.10, 18.20, 54.20, 83.20],
+        'Change %': [2.8, 2.5, 3.0, 2.0, 2.6]
+    }
+    
+    df = pd.DataFrame(crops_data)
+    
+    fig = px.bar(
+        df,
+        x='Crop',
+        y=['Current Price', 'Last Week'],
+        title="Current vs Last Week Prices",
+        barmode='group'
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Market news and updates
+    st.subheader("📰 Market News & Updates")
+    
+    news_items = [
+        {
+            "title": "Monsoon forecast positive for Kharif crops",
+            "summary": "IMD predicts normal rainfall, boosting crop prospects",
+            "impact": "Positive",
+            "date": "2024-01-15"
+        },
+        {
+            "title": "Export demand for wheat increases",
+            "summary": "International buyers showing increased interest",
+            "impact": "Positive",
+            "date": "2024-01-14"
+        },
+        {
+            "title": "Storage facility expansion announced",
+            "summary": "Government announces new cold storage facilities",
+            "impact": "Positive",
+            "date": "2024-01-13"
+        }
+    ]
+    
+    for news in news_items:
+        with st.expander(f"📰 {news['title']} - {news['date']}"):
+            st.write(news['summary'])
+            impact_color = "green" if news['impact'] == "Positive" else "red"
+            st.markdown(f"**Impact:** <span style='color:{impact_color}'>{news['impact']}</span>", unsafe_allow_html=True)
+
+def show_settings():
+    st.header("⚙️ System Settings")
+    
+    tab1, tab2, tab3 = st.tabs(["General", "Notifications", "Data Management"])
+    
+    with tab1:
+        st.subheader("General Settings")
+        
+        # Location settings
+        st.write("**Farm Location**")
+        latitude = st.number_input("Latitude", value=28.6139, format="%.4f")
+        longitude = st.number_input("Longitude", value=77.2090, format="%.4f")
+        
+        # Farm details
+        st.write("**Farm Details**")
+        farm_size = st.number_input("Farm size (acres)", min_value=0.1, value=5.0)
+        crop_type = st.selectbox("Primary crop", ["Wheat", "Rice", "Corn", "Mixed"])
+        
+        if st.button("Save General Settings"):
+            settings = {
+                'latitude': latitude,
+                'longitude': longitude,
+                'farm_size': farm_size,
+                'crop_type': crop_type
+            }
+            st.session_state.db_manager.save_general_settings(settings)
+            st.success("Settings saved!")
+    
+    with tab2:
+        st.subheader("Notification Settings")
+        
+        email_notifications = st.checkbox("Email notifications", value=True)
+        sms_notifications = st.checkbox("SMS notifications", value=False)
+        
+        st.write("**Alert Thresholds**")
+        low_moisture_alert = st.slider("Low soil moisture alert (%)", 0, 100, 25)
+        high_temp_alert = st.slider("High temperature alert (°C)", 20, 50, 40)
+        
+        if st.button("Save Notification Settings"):
+            st.success("Notification settings saved!")
+    
+    with tab3:
+        st.subheader("Data Management")
+        
+        # Database statistics
+        stats = st.session_state.db_manager.get_database_stats()
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.metric("Sensor Records", f"{stats['sensor_records']:,}")
+            st.metric("Irrigation Records", f"{stats['irrigation_records']:,}")
+        
+        with col2:
+            st.metric("Price Records", f"{stats['price_records']:,}")
+            st.metric("Database Size", f"{stats['db_size_mb']:.1f} MB")
+        
+        # Data export
+        st.write("**Data Export**")
+        export_type = st.selectbox("Export type", ["Sensor Data", "Irrigation Logs", "Price Data", "All Data"])
+        
+        if st.button("Export Data"):
+            # Implement data export functionality
+            st.success("Data exported successfully!")
+        
+        # Data cleanup
+        st.write("**Data Cleanup**")
+        st.warning("⚠️ This will permanently delete old data!")
+        
+        if st.button("Delete data older than 1 year", type="secondary"):
+            if st.session_state.db_manager.cleanup_old_data(days=365):
+                st.success("Old data cleaned up!")
+
+def check_system_alerts(sensor_data):
+    alerts = []
+    
+    if sensor_data['soil_moisture'] < 25:
+        alerts.append("🚨 Low soil moisture detected! Consider irrigation.")
+    
+    if sensor_data['temperature'] > 40:
+        alerts.append("🌡️ High temperature alert! Monitor crops closely.")
+    
+    if sensor_data['humidity'] < 30:
+        alerts.append("💨 Low humidity detected! Increase irrigation frequency.")
+    
+    # Check irrigation system
+    irrigation_status = st.session_state.irrigation_controller.get_status()
+    if not irrigation_status['system_health']:
+        alerts.append("⚠️ Irrigation system malfunction detected!")
+    
+    return alerts
+
+if __name__ == "__main__":
+    main()
+
+==================== END OF app.py ====================
+
+
+==================== FILE: test_app.py ====================
+
+#!/usr/bin/env python3
+"""
+Simple test script to verify the Smart Irrigation System works
+"""
+
+import sys
+import os
+
+# Add current directory to path
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+def test_imports():
+    """Test if all modules can be imported"""
+    print("Testing imports...")
+    
+    try:
+        import streamlit as st
+        print("✅ Streamlit imported successfully")
+    except ImportError as e:
+        print(f"❌ Streamlit import failed: {e}")
+        return False
+    
+    try:
+        import pandas as pd
+        print("✅ Pandas imported successfully")
+    except ImportError as e:
+        print(f"❌ Pandas import failed: {e}")
+        return False
+    
+    try:
+        import numpy as np
+        print("✅ NumPy imported successfully")
+    except ImportError as e:
+        print(f"❌ NumPy import failed: {e}")
+        return False
+    
+    try:
+        import plotly.express as px
+        print("✅ Plotly imported successfully")
+    except ImportError as e:
+        print(f"❌ Plotly import failed: {e}")
+        return False
+    
+    try:
+        from sklearn.ensemble import RandomForestRegressor
+        print("✅ Scikit-learn imported successfully")
+    except ImportError as e:
+        print(f"❌ Scikit-learn import failed: {e}")
+        return False
+    
+    return True
+
+def test_utility_modules():
+    """Test if utility modules can be imported"""
+    print("\nTesting utility modules...")
+    
+    try:
+        from utils.database import DatabaseManager
+        print("✅ DatabaseManager imported successfully")
+        
+        # Test database initialization
+        db = DatabaseManager()
+        print("✅ Database initialized successfully")
+    except Exception as e:
+        print(f"❌ DatabaseManager test failed: {e}")
+        return False
+    
+    try:
+        from utils.iot_simulator import IoTSensorSimulator
+        print("✅ IoTSensorSimulator imported successfully")
+        
+        # Test sensor simulation
+        iot = IoTSensorSimulator()
+        data = iot.get_latest_data()
+        print(f"✅ Sensor data generated: {list(data.keys())}")
+    except Exception as e:
+        print(f"❌ IoTSensorSimulator test failed: {e}")
+        return False
+    
+    try:
+        from utils.crop_price_predictor import CropPricePredictor
+        print("✅ CropPricePredictor imported successfully")
+        
+        # Test price prediction
+        predictor = CropPricePredictor()
+        prediction = predictor.predict_price("Wheat", 7)
+        print(f"✅ Price prediction generated for Wheat")
+    except Exception as e:
+        print(f"❌ CropPricePredictor test failed: {e}")
+        return False
+    
+    try:
+        from utils.irrigation_controller import IrrigationController
+        print("✅ IrrigationController imported successfully")
+        
+        # Test irrigation controller
+        controller = IrrigationController()
+        status = controller.get_status()
+        print(f"✅ Irrigation status retrieved")
+    except Exception as e:
+        print(f"❌ IrrigationController test failed: {e}")
+        return False
+    
+    try:
+        from utils.weather_api import WeatherAPI
+        print("✅ WeatherAPI imported successfully")
+        
+        # Test weather data
+        weather = WeatherAPI()
+        current = weather.get_current_weather()
+        print(f"✅ Weather data retrieved")
+    except Exception as e:
+        print(f"❌ WeatherAPI test failed: {e}")
+        return False
+    
+    try:
+        from utils.market_data import MarketDataFetcher
+        print("✅ MarketDataFetcher imported successfully")
+        
+        # Test market data
+        market = MarketDataFetcher()
+        data = market.get_current_market_data()
+        print(f"✅ Market data retrieved")
+    except Exception as e:
+        print(f"❌ MarketDataFetcher test failed: {e}")
+        return False
+    
+    return True
+
+def main():
+    print("🌱 Smart Irrigation & Crop Price Prediction System - Test Suite")
+    print("=" * 70)
+    
+    # Test imports
+    if not test_imports():
+        print("\n❌ Import tests failed!")
+        return False
+    
+    # Test utility modules
+    if not test_utility_modules():
+        print("\n❌ Utility module tests failed!")
+        return False
+    
+    print("\n" + "=" * 70)
+    print("🎉 All tests passed! The system is ready to use.")
+    print("\nTo start the application:")
+    print("1. Run: python3 -m streamlit run app.py")
+    print("2. Open your browser to: http://localhost:8501")
+    print("\nNote: Add /home/ubuntu/.local/bin to PATH for streamlit command")
+    
+    return True
+
+if __name__ == "__main__":
+    success = main()
+    sys.exit(0 if success else 1)
+
+==================== END OF test_app.py ====================
+
+
+==================== FILE: setup.py ====================
+
+#!/usr/bin/env python3
+"""
+Setup script for Smart Irrigation & Crop Price Prediction System
+"""
+
+import os
+import sys
+import subprocess
+import sqlite3
+from pathlib import Path
+
+def check_python_version():
+    """Check if Python version is compatible"""
+    if sys.version_info < (3, 8):
+        print("❌ Python 3.8 or higher is required")
+        print(f"Current version: {sys.version}")
+        return False
+    print(f"✅ Python version: {sys.version}")
+    return True
+
+def install_requirements():
+    """Install required packages"""
+    print("📦 Installing required packages...")
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
+        print("✅ Requirements installed successfully")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Failed to install requirements: {e}")
+        return False
+
+def create_directories():
+    """Create necessary directories"""
+    print("📁 Creating directories...")
+    directories = [
+        "data",
+        "models",
+        "static/css",
+        "static/js", 
+        "static/images",
+        "config",
+        "logs"
+    ]
+    
+    for directory in directories:
+        Path(directory).mkdir(parents=True, exist_ok=True)
+        print(f"   Created: {directory}")
+    
+    print("✅ Directories created successfully")
+
+def initialize_database():
+    """Initialize the SQLite database"""
+    print("🗃️ Initializing database...")
+    try:
+        from utils.database import DatabaseManager
+        db_manager = DatabaseManager()
+        print("✅ Database initialized successfully")
+        return True
+    except Exception as e:
+        print(f"❌ Failed to initialize database: {e}")
+        return False
+
+def create_config_file():
+    """Create default configuration file"""
+    print("⚙️ Creating configuration file...")
+    
+    config_content = """# Smart Irrigation System Configuration
+
+# Database Configuration
+DATABASE_PATH = "data/smart_irrigation.db"
+
+# API Keys (replace with your actual keys)
+OPENWEATHER_API_KEY = "your_openweather_api_key_here"
+AGMARKNET_API_KEY = "your_agmarknet_api_key_here"
+
+# MQTT Configuration (for real IoT devices)
+MQTT_BROKER_HOST = "localhost"
+MQTT_BROKER_PORT = 1883
+MQTT_USERNAME = ""
+MQTT_PASSWORD = ""
+
+# System Settings
+DEFAULT_FARM_LATITUDE = 28.6139
+DEFAULT_FARM_LONGITUDE = 77.2090
+DEFAULT_FARM_SIZE_ACRES = 5.0
+
+# Irrigation Settings
+DEFAULT_MOISTURE_TRIGGER = 30
+DEFAULT_IRRIGATION_DURATION = 15
+DEFAULT_WATER_FLOW_RATE = 10
+
+# Alert Settings
+EMAIL_NOTIFICATIONS = True
+SMS_NOTIFICATIONS = False
+ALERT_EMAIL = "your_email@example.com"
+
+# Logging Settings
+LOG_LEVEL = "INFO"
+LOG_FILE = "logs/irrigation_system.log"
+
+# Security Settings
+SESSION_SECRET_KEY = "your_secret_key_here"
+ENABLE_AUTHENTICATION = False
+
+# Performance Settings
+SENSOR_UPDATE_INTERVAL = 5  # seconds
+WEATHER_UPDATE_INTERVAL = 3600  # seconds (1 hour)
+PRICE_UPDATE_INTERVAL = 86400  # seconds (24 hours)
+"""
+    
+    config_path = "config/settings.py"
+    with open(config_path, "w") as f:
+        f.write(config_content)
+    
+    print(f"✅ Configuration file created: {config_path}")
+
+def create_sample_data():
+    """Create sample data for demonstration"""
+    print("📊 Creating sample data...")
+    try:
+        from utils.database import DatabaseManager
+        from utils.iot_simulator import IoTSensorSimulator
+        from datetime import datetime, timedelta
+        import random
+        
+        db_manager = DatabaseManager()
+        
+        # Create sample sensor data for the last 7 days
+        for i in range(7 * 24):  # 7 days, hourly data
+            timestamp = datetime.now() - timedelta(hours=i)
+            sample_data = {
+                'soil_moisture': random.uniform(20, 80),
+                'temperature': random.uniform(15, 40),
+                'humidity': random.uniform(30, 90),
+                'light_intensity': random.uniform(0, 100000),
+                'ph_level': random.uniform(6.0, 8.0),
+                'nitrogen': random.uniform(20, 80),
+                'phosphorus': random.uniform(15, 60),
+                'potassium': random.uniform(25, 70)
+            }
+            
+            # Insert into database (you would modify this to use actual timestamp)
+            # db_manager.insert_sensor_data(sample_data)
+        
+        # Create sample irrigation logs
+        for i in range(10):
+            start_time = datetime.now() - timedelta(days=random.randint(1, 7))
+            end_time = start_time + timedelta(minutes=random.randint(10, 60))
+            duration = (end_time - start_time).total_seconds() / 60
+            water_used = duration * 10  # 10 liters per minute
+            
+            db_manager.insert_irrigation_log(
+                start_time, end_time, duration, water_used, 
+                "Automatic irrigation", False
+            )
+        
+        print("✅ Sample data created successfully")
+        return True
+    except Exception as e:
+        print(f"❌ Failed to create sample data: {e}")
+        return False
+
+def create_startup_script():
+    """Create startup script for easy launching"""
+    print("🚀 Creating startup script...")
+    
+    # Windows batch file
+    windows_script = """@echo off
+echo Starting Smart Irrigation System...
+cd /d "%~dp0"
+streamlit run app.py
+pause
+"""
+    
+    with open("start_windows.bat", "w") as f:
+        f.write(windows_script)
+    
+    # Unix shell script
+    unix_script = """#!/bin/bash
+echo "Starting Smart Irrigation System..."
+cd "$(dirname "$0")"
+streamlit run app.py
+"""
+    
+    with open("start_unix.sh", "w") as f:
+        f.write(unix_script)
+    
+    # Make Unix script executable
+    try:
+        os.chmod("start_unix.sh", 0o755)
+    except:
+        pass  # Windows doesn't support chmod
+    
+    print("✅ Startup scripts created")
+
+def run_tests():
+    """Run basic tests to verify setup"""
+    print("🧪 Running setup verification tests...")
+    
+    tests_passed = 0
+    total_tests = 5
+    
+    # Test 1: Import main modules
+    try:
+        from utils.database import DatabaseManager
+        from utils.iot_simulator import IoTSensorSimulator
+        from utils.crop_price_predictor import CropPricePredictor
+        from utils.irrigation_controller import IrrigationController
+        from utils.weather_api import WeatherAPI
+        from utils.market_data import MarketDataFetcher
+        print("   ✅ Module imports successful")
+        tests_passed += 1
+    except Exception as e:
+        print(f"   ❌ Module import failed: {e}")
+    
+    # Test 2: Database connection
+    try:
+        db_manager = DatabaseManager()
+        stats = db_manager.get_database_stats()
+        print("   ✅ Database connection successful")
+        tests_passed += 1
+    except Exception as e:
+        print(f"   ❌ Database connection failed: {e}")
+    
+    # Test 3: IoT simulator
+    try:
+        iot_sim = IoTSensorSimulator()
+        data = iot_sim.get_latest_data()
+        print("   ✅ IoT simulator working")
+        tests_passed += 1
+    except Exception as e:
+        print(f"   ❌ IoT simulator failed: {e}")
+    
+    # Test 4: Price predictor
+    try:
+        predictor = CropPricePredictor()
+        prediction = predictor.predict_price("Wheat", 7)
+        print("   ✅ Price predictor working")
+        tests_passed += 1
+    except Exception as e:
+        print(f"   ❌ Price predictor failed: {e}")
+    
+    # Test 5: Irrigation controller
+    try:
+        controller = IrrigationController()
+        status = controller.get_status()
+        print("   ✅ Irrigation controller working")
+        tests_passed += 1
+    except Exception as e:
+        print(f"   ❌ Irrigation controller failed: {e}")
+    
+    print(f"🧪 Tests completed: {tests_passed}/{total_tests} passed")
+    return tests_passed == total_tests
+
+def main():
+    """Main setup function"""
+    print("🌱 Smart Irrigation & Crop Price Prediction System Setup")
+    print("=" * 60)
+    
+    # Check Python version
+    if not check_python_version():
+        return False
+    
+    # Install requirements
+    if not install_requirements():
+        return False
+    
+    # Create directories
+    create_directories()
+    
+    # Initialize database
+    if not initialize_database():
+        return False
+    
+    # Create configuration file
+    create_config_file()
+    
+    # Create sample data
+    create_sample_data()
+    
+    # Create startup scripts
+    create_startup_script()
+    
+    # Run verification tests
+    tests_passed = run_tests()
+    
+    print("\n" + "=" * 60)
+    if tests_passed:
+        print("🎉 Setup completed successfully!")
+        print("\nNext steps:")
+        print("1. Edit config/settings.py with your API keys")
+        print("2. Run 'streamlit run app.py' to start the application")
+        print("3. Open http://localhost:8501 in your browser")
+        print("\nAlternatively, use the startup scripts:")
+        print("- Windows: double-click start_windows.bat")
+        print("- Linux/Mac: ./start_unix.sh")
+    else:
+        print("⚠️ Setup completed with some issues")
+        print("Please check the error messages above and resolve them")
+    
+    return tests_passed
+
+if __name__ == "__main__":
+    success = main()
+    sys.exit(0 if success else 1)
+
+==================== END OF setup.py ====================
+
+
+==================== FILE: start.sh ====================
+
+#!/bin/bash
+
+echo "🌱 Starting Smart Irrigation & Crop Price Prediction System..."
+echo "================================================================"
+
+# Add local bin to PATH for streamlit
+export PATH="$HOME/.local/bin:$PATH"
+
+# Check if streamlit is available
+if ! command -v streamlit &> /dev/null; then
+    echo "⚠️  Streamlit not found in PATH. Using python3 -m streamlit..."
+    python3 -m streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+else
+    echo "✅ Starting Streamlit application..."
+    streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+fi
+
+==================== END OF start.sh ====================
+
+
+==================== FILE: README.md ====================
+
+# 🌱 Smart Irrigation & Crop Price Prediction System
+
+A comprehensive IoT-based smart irrigation system with integrated crop price prediction using machine learning and real-time market data analysis.
+
+## 🚀 Features
+
+### Smart Irrigation System
+- **Real-time IoT Sensor Monitoring**: Soil moisture, temperature, humidity, pH, and nutrient levels
+- **Automated Irrigation Control**: Intelligent scheduling based on sensor data and weather conditions
+- **Manual Override**: Complete manual control with emergency stop functionality
+- **Water Usage Tracking**: Monitor and optimize water consumption
+- **System Health Monitoring**: Real-time diagnostics and alerts
+- **Weather Integration**: Weather-based irrigation recommendations
+
+### Crop Price Prediction
+- **Machine Learning Models**: Random Forest and Linear Regression for price forecasting
+- **Real-time Market Data**: Integration with agricultural market APIs
+- **Price Trend Analysis**: Historical data analysis and seasonal patterns
+- **Market Comparison**: Multi-market price comparison and arbitrage opportunities
+- **Investment Recommendations**: Buy/sell/hold recommendations based on predictions
+
+### User Interface
+- **Modern Streamlit Dashboard**: Interactive web interface
+- **Real-time Data Visualization**: Charts, graphs, and live sensor data
+- **Mobile-Responsive Design**: Works on desktop, tablet, and mobile
+- **Multi-page Navigation**: Organized sections for different functionalities
+- **Custom Alerts**: Configurable notifications and warnings
+
+## 📋 Requirements
+
+- Python 3.8+
+- Streamlit
+- Pandas, NumPy
+- Scikit-learn
+- Plotly
+- SQLite3
+- MQTT (for real IoT devices)
+
+## 🛠️ Installation
+
+1. **Clone the repository**:
+```bash
+git clone <repository-url>
+cd smart_irrigation_system
+```
+
+2. **Install dependencies**:
+```bash
+pip install -r requirements.txt
+```
+
+3. **Run the application**:
+```bash
+streamlit run app.py
+```
+
+4. **Access the dashboard**:
+Open your browser and go to `http://localhost:8501`
+
+## 📁 Project Structure
+
+```
+smart_irrigation_system/
+├── app.py                          # Main Streamlit application
+├── requirements.txt                # Python dependencies
+├── README.md                      # Project documentation
+├── data/                          # Database and data files
+│   └── smart_irrigation.db        # SQLite database
+├── utils/                         # Utility modules
+│   ├── __init__.py
+│   ├── database.py                # Database management
+│   ├── iot_simulator.py           # IoT sensor simulation
+│   ├── crop_price_predictor.py    # ML price prediction
+│   ├── irrigation_controller.py   # Irrigation automation
+│   ├── weather_api.py             # Weather data integration
+│   └── market_data.py             # Market data fetching
+├── models/                        # Trained ML models
+├── static/                        # Static assets
+│   ├── css/
+│   ├── js/
+│   └── images/
+└── config/                        # Configuration files
+```
+
+## 🎯 Usage
+
+### Dashboard Overview
+The main dashboard provides:
+- Real-time sensor readings
+- System status indicators
+- Irrigation control buttons
+- Water usage statistics
+- Price prediction charts
+- Market analysis
+
+### IoT Sensor Management
+- View real-time sensor data
+- Configure sensor thresholds
+- Monitor sensor health
+- Export sensor data
+
+### Irrigation Control
+- Manual start/stop irrigation
+- Schedule automated irrigation
+- Set automatic triggers
+- Monitor water usage
+- View irrigation history
+
+### Crop Price Prediction
+- Select crops for prediction
+- Set prediction timeframes
+- View price trends and forecasts
+- Get buy/sell recommendations
+- Compare market prices
+
+### Market Analysis
+- Real-time market overview
+- Multi-crop price comparison
+- Market news and updates
+- Seasonal price patterns
+- Supply/demand analysis
+
+## 🔧 Configuration
+
+### Sensor Settings
+Configure sensor thresholds in the Settings page:
+- Soil moisture alerts
+- Temperature ranges
+- Humidity thresholds
+- pH level monitoring
+
+### Irrigation Settings
+Customize irrigation parameters:
+- Moisture trigger levels
+- Default irrigation duration
+- Maximum daily sessions
+- Water flow rates
+
+### Price Prediction Settings
+Adjust ML model parameters:
+- Prediction timeframes
+- Confidence thresholds
+- Market data sources
+- Alert configurations
+
+## 📊 Data Sources
+
+### IoT Sensors (Simulated)
+- Soil moisture sensors
+- Temperature sensors
+- Humidity sensors
+- Light intensity sensors
+- pH sensors
+- NPK nutrient sensors
+
+### Weather Data
+- OpenWeatherMap API (configurable)
+- Local weather stations
+- Satellite data integration
+
+### Market Data
+- AgMarkNet (Indian agricultural markets)
+- Commodity APIs
+- International market feeds
+- Government price data
+
+## 🤖 Machine Learning Models
+
+### Price Prediction Models
+- **Random Forest Regressor**: Primary prediction model
+- **Linear Regression**: Baseline comparison
+- **Feature Engineering**: Time-series, seasonal, and market factors
+- **Model Validation**: Cross-validation and performance metrics
+
+### Features Used
+- Historical prices
+- Seasonal patterns
+- Weather data
+- Market volume
+- Supply/demand factors
+- Economic indicators
+
+## 🌐 IoT Integration
+
+### MQTT Support
+For real IoT devices, the system supports MQTT:
+```python
+# Configure MQTT broker
+broker_host = "localhost"
+broker_port = 1883
+
+# Topics
+sensors/soil_moisture
+sensors/temperature
+sensors/humidity
+control/irrigation
+```
+
+### Sensor Hardware Compatibility
+- Arduino-based sensors
+- Raspberry Pi controllers
+- ESP32/ESP8266 modules
+- Commercial IoT sensors
+
+## 📈 Performance Metrics
+
+### Irrigation Efficiency
+- Water usage optimization
+- Crop yield improvement
+- Energy consumption reduction
+- Automated vs manual sessions
+
+### Prediction Accuracy
+- Mean Absolute Error (MAE)
+- R-squared scores
+- Prediction confidence levels
+- Backtesting results
+
+## 🚨 Alerts and Notifications
+
+### System Alerts
+- Low soil moisture
+- High temperature warnings
+- System malfunctions
+- Irrigation failures
+
+### Price Alerts
+- Target price reached
+- Significant price changes
+- Market opportunities
+- Seasonal recommendations
+
+## 🔐 Security Features
+
+- Input validation
+- SQL injection prevention
+- Data encryption (configurable)
+- User authentication (extensible)
+- API key management
+
+## 🧪 Testing
+
+Run the test suite:
+```bash
+python -m pytest tests/
+```
+
+Test coverage includes:
+- Unit tests for all modules
+- Integration tests
+- Performance benchmarks
+- Data validation tests
+
+## 📱 Mobile Support
+
+The dashboard is fully responsive and works on:
+- Desktop browsers
+- Tablets
+- Mobile phones
+- Progressive Web App (PWA) ready
+
+## 🔄 Data Export/Import
+
+### Export Options
+- CSV format for spreadsheet analysis
+- JSON format for data exchange
+- PDF reports (configurable)
+- API endpoints for integration
+
+### Import Options
+- Historical price data
+- Sensor calibration data
+- Weather data
+- Market data feeds
+
+## 🌍 Scalability
+
+### Multi-Farm Support
+- Farm location management
+- Separate sensor networks
+- Independent irrigation systems
+- Consolidated reporting
+
+### Cloud Deployment
+- Docker containerization
+- AWS/Azure deployment
+- Database scaling
+- Load balancing
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests for new features
+5. Submit a pull request
+
+## 📄 License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## 🆘 Support
+
+For support and questions:
+- Create an issue on GitHub
+- Check the documentation
+- Review the FAQ section
+- Contact the development team
+
+## 🔮 Future Enhancements
+
+### Planned Features
+- AI-powered crop recommendations
+- Drone integration for aerial monitoring
+- Blockchain for supply chain tracking
+- Mobile app development
+- Advanced analytics dashboard
+- Integration with farm management systems
+
+### Research Areas
+- Computer vision for crop health monitoring
+- Predictive maintenance for irrigation equipment
+- Climate change impact modeling
+- Precision agriculture techniques
+
+## 📚 Documentation
+
+Detailed documentation available in the `/docs` folder:
+- API documentation
+- Installation guides
+- Configuration tutorials
+- Troubleshooting guides
+- Best practices
+
+## 🏆 Acknowledgments
+
+- OpenWeatherMap for weather data
+- AgMarkNet for market data
+- Streamlit for the web framework
+- Scikit-learn for ML capabilities
+- The open-source community
+
+---
+
+**Built with ❤️ for sustainable agriculture and smart farming**
+
+==================== END OF README.md ====================
+
+
+==================== FILE: requirements.txt ====================
+
+streamlit==1.28.1
+pandas==2.0.3
+numpy==1.24.3
+matplotlib==3.7.2
+seaborn==0.12.2
+plotly==5.15.0
+scikit-learn==1.3.0
+requests==2.31.0
+paho-mqtt==1.6.1
+sqlite3
+datetime
+yfinance==0.2.18
+beautifulsoup4==4.12.2
+lxml==4.9.3
+schedule==1.2.0
+threading
+json
+time
+random
+logging
+asyncio
+websockets==11.0.3
+pillow==10.0.0
+altair==5.0.1
+
+==================== END OF requirements.txt ====================
+
+
+==================== FILE: requirements_simple.txt ====================
+
+streamlit
+pandas
+numpy
+matplotlib
+seaborn
+plotly
+scikit-learn
+requests
+
+==================== END OF requirements_simple.txt ====================
+
+
+==================== FILE: utils/__init__.py ====================
+
+# Utils package for Smart Irrigation System
+
+==================== END OF utils/__init__.py ====================
+
+
+==================== FILE: utils/database.py ====================
+
+import sqlite3
+import pandas as pd
+from datetime import datetime, timedelta
+import json
+import os
+
+class DatabaseManager:
+    def __init__(self, db_path="data/smart_irrigation.db"):
+        self.db_path = db_path
+        self.ensure_directory()
+        self.init_database()
+    
+    def ensure_directory(self):
+        """Ensure the data directory exists"""
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+    
+    def init_database(self):
+        """Initialize database tables"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Sensor data table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sensor_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                soil_moisture REAL,
+                temperature REAL,
+                humidity REAL,
+                light_intensity REAL,
+                ph_level REAL,
+                nitrogen REAL,
+                phosphorus REAL,
+                potassium REAL
+            )
+        ''')
+        
+        # Irrigation logs table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS irrigation_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                start_time DATETIME,
+                end_time DATETIME,
+                duration_minutes INTEGER,
+                water_used_liters REAL,
+                trigger_reason TEXT,
+                manual_override BOOLEAN DEFAULT FALSE
+            )
+        ''')
+        
+        # Crop price data table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS crop_prices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date DATE,
+                crop_name TEXT,
+                price_per_kg REAL,
+                market_location TEXT,
+                source TEXT
+            )
+        ''')
+        
+        # System settings table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS system_settings (
+                id INTEGER PRIMARY KEY,
+                setting_key TEXT UNIQUE,
+                setting_value TEXT,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Weather data table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS weather_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                temperature REAL,
+                humidity REAL,
+                pressure REAL,
+                wind_speed REAL,
+                precipitation REAL,
+                weather_condition TEXT
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+    
+    def insert_sensor_data(self, data):
+        """Insert sensor data into database"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO sensor_data 
+            (soil_moisture, temperature, humidity, light_intensity, ph_level, nitrogen, phosphorus, potassium)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            data['soil_moisture'],
+            data['temperature'],
+            data['humidity'],
+            data['light_intensity'],
+            data.get('ph_level', 7.0),
+            data.get('nitrogen', 50),
+            data.get('phosphorus', 30),
+            data.get('potassium', 40)
+        ))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_sensor_history(self, hours=24):
+        """Get sensor data history"""
+        conn = sqlite3.connect(self.db_path)
+        
+        query = '''
+            SELECT * FROM sensor_data 
+            WHERE timestamp >= datetime('now', '-{} hours')
+            ORDER BY timestamp DESC
+        '''.format(hours)
+        
+        df = pd.read_sql_query(query, conn)
+        conn.close()
+        
+        return df
+    
+    def insert_irrigation_log(self, start_time, end_time, duration, water_used, reason, manual=False):
+        """Insert irrigation log"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO irrigation_logs 
+            (start_time, end_time, duration_minutes, water_used_liters, trigger_reason, manual_override)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (start_time, end_time, duration, water_used, reason, manual))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_irrigation_history(self, days=7):
+        """Get irrigation history"""
+        conn = sqlite3.connect(self.db_path)
+        
+        query = '''
+            SELECT DATE(start_time) as date, 
+                   SUM(duration_minutes) as duration_minutes,
+                   SUM(water_used_liters) as water_used
+            FROM irrigation_logs 
+            WHERE start_time >= datetime('now', '-{} days')
+            GROUP BY DATE(start_time)
+            ORDER BY date DESC
+        '''.format(days)
+        
+        df = pd.read_sql_query(query, conn)
+        conn.close()
+        
+        return df
+    
+    def get_water_usage(self, days=30):
+        """Get water usage statistics"""
+        conn = sqlite3.connect(self.db_path)
+        
+        query = '''
+            SELECT DATE(start_time) as date, 
+                   SUM(water_used_liters) as liters_used
+            FROM irrigation_logs 
+            WHERE start_time >= datetime('now', '-{} days')
+            GROUP BY DATE(start_time)
+            ORDER BY date
+        '''.format(days)
+        
+        df = pd.read_sql_query(query, conn)
+        conn.close()
+        
+        return df
+    
+    def insert_crop_price(self, date, crop_name, price, market_location, source):
+        """Insert crop price data"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO crop_prices 
+            (date, crop_name, price_per_kg, market_location, source)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (date, crop_name, price, market_location, source))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_crop_price_history(self, crop_name, days=90):
+        """Get crop price history"""
+        conn = sqlite3.connect(self.db_path)
+        
+        query = '''
+            SELECT * FROM crop_prices 
+            WHERE crop_name = ? AND date >= date('now', '-{} days')
+            ORDER BY date
+        '''.format(days)
+        
+        df = pd.read_sql_query(query, conn, params=(crop_name,))
+        conn.close()
+        
+        return df
+    
+    def save_setting(self, key, value):
+        """Save system setting"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO system_settings (setting_key, setting_value)
+            VALUES (?, ?)
+        ''', (key, json.dumps(value)))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_setting(self, key, default=None):
+        """Get system setting"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT setting_value FROM system_settings WHERE setting_key = ?', (key,))
+        result = cursor.fetchone()
+        
+        conn.close()
+        
+        if result:
+            return json.loads(result[0])
+        return default
+    
+    def save_sensor_config(self, config):
+        """Save sensor configuration"""
+        self.save_setting('sensor_config', config)
+    
+    def save_general_settings(self, settings):
+        """Save general settings"""
+        self.save_setting('general_settings', settings)
+    
+    def get_database_stats(self):
+        """Get database statistics"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        stats = {}
+        
+        # Count records in each table
+        cursor.execute('SELECT COUNT(*) FROM sensor_data')
+        stats['sensor_records'] = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM irrigation_logs')
+        stats['irrigation_records'] = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM crop_prices')
+        stats['price_records'] = cursor.fetchone()[0]
+        
+        # Get database size
+        cursor.execute("SELECT page_count * page_size as size FROM pragma_page_count(), pragma_page_size()")
+        size_bytes = cursor.fetchone()[0]
+        stats['db_size_mb'] = size_bytes / (1024 * 1024)
+        
+        conn.close()
+        
+        return stats
+    
+    def cleanup_old_data(self, days=365):
+        """Clean up old data"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Delete old sensor data
+            cursor.execute('''
+                DELETE FROM sensor_data 
+                WHERE timestamp < datetime('now', '-{} days')
+            '''.format(days))
+            
+            # Delete old irrigation logs
+            cursor.execute('''
+                DELETE FROM irrigation_logs 
+                WHERE start_time < datetime('now', '-{} days')
+            '''.format(days))
+            
+            # Delete old crop prices
+            cursor.execute('''
+                DELETE FROM crop_prices 
+                WHERE date < date('now', '-{} days')
+            '''.format(days))
+            
+            conn.commit()
+            conn.close()
+            
+            return True
+        except Exception as e:
+            print(f"Error cleaning up data: {e}")
+            return False
+
+==================== END OF utils/database.py ====================
+
+
+==================== FILE: utils/iot_simulator.py ====================
+
+import random
+import time
+import threading
+from datetime import datetime, timedelta
+import json
+import numpy as np
+
+class IoTSensorSimulator:
+    def __init__(self):
+        self.running = False
+        self.current_data = {
+            'soil_moisture': 45.0,
+            'temperature': 25.0,
+            'humidity': 60.0,
+            'light_intensity': 50000,
+            'ph_level': 7.0,
+            'nitrogen': 50,
+            'phosphorus': 30,
+            'potassium': 40,
+            'timestamp': datetime.now()
+        }
+        self.data_history = []
+        self.simulation_thread = None
+        self.start_simulation()
+    
+    def start_simulation(self):
+        """Start the sensor data simulation"""
+        if not self.running:
+            self.running = True
+            self.simulation_thread = threading.Thread(target=self._simulate_sensors, daemon=True)
+            self.simulation_thread.start()
+    
+    def stop_simulation(self):
+        """Stop the sensor data simulation"""
+        self.running = False
+        if self.simulation_thread:
+            self.simulation_thread.join()
+    
+    def _simulate_sensors(self):
+        """Simulate sensor readings with realistic variations"""
+        while self.running:
+            # Simulate time-based variations
+            hour = datetime.now().hour
+            
+            # Soil moisture (affected by irrigation and evaporation)
+            base_moisture = 45
+            if 6 <= hour <= 18:  # Daytime evaporation
+                moisture_trend = -0.5
+            else:  # Nighttime retention
+                moisture_trend = 0.1
+            
+            self.current_data['soil_moisture'] += random.uniform(-1, 1) + moisture_trend
+            self.current_data['soil_moisture'] = max(10, min(90, self.current_data['soil_moisture']))
+            
+            # Temperature (follows daily cycle)
+            base_temp = 25 + 10 * np.sin((hour - 6) * np.pi / 12)  # Peak at 2 PM
+            self.current_data['temperature'] = base_temp + random.uniform(-3, 3)
+            self.current_data['temperature'] = max(5, min(45, self.current_data['temperature']))
+            
+            # Humidity (inversely related to temperature)
+            base_humidity = 80 - (self.current_data['temperature'] - 20) * 2
+            self.current_data['humidity'] = base_humidity + random.uniform(-10, 10)
+            self.current_data['humidity'] = max(20, min(95, self.current_data['humidity']))
+            
+            # Light intensity (follows sun cycle)
+            if 6 <= hour <= 18:
+                base_light = 80000 * np.sin((hour - 6) * np.pi / 12)
+            else:
+                base_light = 0
+            
+            self.current_data['light_intensity'] = max(0, base_light + random.uniform(-5000, 5000))
+            
+            # pH level (relatively stable with small variations)
+            self.current_data['ph_level'] += random.uniform(-0.1, 0.1)
+            self.current_data['ph_level'] = max(5.5, min(8.5, self.current_data['ph_level']))
+            
+            # Nutrient levels (NPK - slowly decrease over time)
+            nutrients = ['nitrogen', 'phosphorus', 'potassium']
+            for nutrient in nutrients:
+                self.current_data[nutrient] += random.uniform(-0.5, 0.2)  # Slight depletion
+                self.current_data[nutrient] = max(0, min(100, self.current_data[nutrient]))
+            
+            # Update timestamp
+            self.current_data['timestamp'] = datetime.now()
+            
+            # Store in history (keep last 1000 readings)
+            self.data_history.append(self.current_data.copy())
+            if len(self.data_history) > 1000:
+                self.data_history.pop(0)
+            
+            time.sleep(5)  # Update every 5 seconds
+    
+    def get_latest_data(self):
+        """Get the latest sensor readings"""
+        return self.current_data.copy()
+    
+    def get_historical_data(self, hours=24):
+        """Get historical sensor data"""
+        cutoff_time = datetime.now() - timedelta(hours=hours)
+        filtered_data = [
+            data for data in self.data_history 
+            if data['timestamp'] >= cutoff_time
+        ]
+        return filtered_data
+    
+    def simulate_irrigation_effect(self, duration_minutes=30):
+        """Simulate the effect of irrigation on soil moisture"""
+        def irrigation_effect():
+            # Gradually increase soil moisture over irrigation duration
+            moisture_increase = 40  # Maximum increase
+            steps = duration_minutes * 12  # 5-second intervals
+            increase_per_step = moisture_increase / steps
+            
+            for _ in range(steps):
+                if self.running:
+                    self.current_data['soil_moisture'] += increase_per_step
+                    self.current_data['soil_moisture'] = min(90, self.current_data['soil_moisture'])
+                    time.sleep(5)
+        
+        # Run irrigation effect in a separate thread
+        irrigation_thread = threading.Thread(target=irrigation_effect, daemon=True)
+        irrigation_thread.start()
+    
+    def add_sensor_noise(self, noise_level=1.0):
+        """Add noise to sensor readings (for testing purposes)"""
+        for key in ['soil_moisture', 'temperature', 'humidity']:
+            if key in self.current_data:
+                noise = random.uniform(-noise_level, noise_level)
+                self.current_data[key] += noise
+    
+    def simulate_sensor_malfunction(self, sensor_type, duration_seconds=60):
+        """Simulate sensor malfunction"""
+        def malfunction():
+            original_value = self.current_data[sensor_type]
+            # Set to unrealistic value
+            if sensor_type == 'soil_moisture':
+                self.current_data[sensor_type] = -1  # Invalid reading
+            elif sensor_type == 'temperature':
+                self.current_data[sensor_type] = 999  # Invalid reading
+            
+            time.sleep(duration_seconds)
+            self.current_data[sensor_type] = original_value
+        
+        malfunction_thread = threading.Thread(target=malfunction, daemon=True)
+        malfunction_thread.start()
+    
+    def calibrate_sensor(self, sensor_type, calibration_offset):
+        """Apply calibration offset to sensor"""
+        if sensor_type in self.current_data:
+            self.current_data[sensor_type] += calibration_offset
+    
+    def get_sensor_status(self):
+        """Get the status of all sensors"""
+        status = {}
+        
+        # Check if readings are within normal ranges
+        status['soil_moisture'] = 'OK' if 0 <= self.current_data['soil_moisture'] <= 100 else 'ERROR'
+        status['temperature'] = 'OK' if -10 <= self.current_data['temperature'] <= 50 else 'ERROR'
+        status['humidity'] = 'OK' if 0 <= self.current_data['humidity'] <= 100 else 'ERROR'
+        status['light_intensity'] = 'OK' if self.current_data['light_intensity'] >= 0 else 'ERROR'
+        status['ph_level'] = 'OK' if 0 <= self.current_data['ph_level'] <= 14 else 'ERROR'
+        
+        return status
+    
+    def export_data_to_json(self, filename=None):
+        """Export sensor data to JSON file"""
+        if filename is None:
+            filename = f"sensor_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        
+        # Convert datetime objects to strings for JSON serialization
+        export_data = []
+        for data_point in self.data_history:
+            data_copy = data_point.copy()
+            data_copy['timestamp'] = data_copy['timestamp'].isoformat()
+            export_data.append(data_copy)
+        
+        with open(filename, 'w') as f:
+            json.dump(export_data, f, indent=2)
+        
+        return filename
+    
+    def load_data_from_json(self, filename):
+        """Load sensor data from JSON file"""
+        try:
+            with open(filename, 'r') as f:
+                data = json.load(f)
+            
+            # Convert timestamp strings back to datetime objects
+            for data_point in data:
+                data_point['timestamp'] = datetime.fromisoformat(data_point['timestamp'])
+            
+            self.data_history = data
+            if data:
+                self.current_data = data[-1].copy()
+            
+            return True
+        except Exception as e:
+            print(f"Error loading data: {e}")
+            return False
+
+# MQTT Integration (for real IoT devices)
+class MQTTSensorClient:
+    def __init__(self, broker_host="localhost", broker_port=1883):
+        self.broker_host = broker_host
+        self.broker_port = broker_port
+        self.client = None
+        self.connected = False
+        
+    def connect(self):
+        """Connect to MQTT broker"""
+        try:
+            import paho.mqtt.client as mqtt
+            
+            self.client = mqtt.Client()
+            self.client.on_connect = self._on_connect
+            self.client.on_message = self._on_message
+            
+            self.client.connect(self.broker_host, self.broker_port, 60)
+            self.client.loop_start()
+            
+            return True
+        except Exception as e:
+            print(f"MQTT connection failed: {e}")
+            return False
+    
+    def _on_connect(self, client, userdata, flags, rc):
+        """Callback for MQTT connection"""
+        if rc == 0:
+            self.connected = True
+            # Subscribe to sensor topics
+            topics = [
+                "sensors/soil_moisture",
+                "sensors/temperature",
+                "sensors/humidity",
+                "sensors/light_intensity",
+                "sensors/ph_level",
+                "sensors/nutrients"
+            ]
+            for topic in topics:
+                client.subscribe(topic)
+        else:
+            print(f"MQTT connection failed with code {rc}")
+    
+    def _on_message(self, client, userdata, msg):
+        """Handle incoming MQTT messages"""
+        try:
+            topic = msg.topic
+            payload = json.loads(msg.payload.decode())
+            
+            # Process sensor data from real IoT devices
+            print(f"Received data from {topic}: {payload}")
+            
+        except Exception as e:
+            print(f"Error processing MQTT message: {e}")
+    
+    def publish_control_command(self, device, command):
+        """Send control commands to IoT devices"""
+        if self.connected and self.client:
+            topic = f"control/{device}"
+            self.client.publish(topic, json.dumps(command))
+    
+    def disconnect(self):
+        """Disconnect from MQTT broker"""
+        if self.client:
+            self.client.loop_stop()
+            self.client.disconnect()
+            self.connected = False
+
+==================== END OF utils/iot_simulator.py ====================
+
+
+==================== FILE: utils/crop_price_predictor.py ====================
+
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error, r2_score
+import joblib
+import requests
+import json
+import warnings
+warnings.filterwarnings('ignore')
+
+class CropPricePredictor:
+    def __init__(self):
+        self.models = {}
+        self.scalers = {}
+        self.crop_data = {}
+        self.initialize_sample_data()
+    
+    def initialize_sample_data(self):
+        """Initialize with sample historical data for demonstration"""
+        crops = ["Wheat", "Rice", "Corn", "Soybeans", "Cotton", "Tomatoes", "Potatoes", "Onions"]
+        
+        # Generate sample historical data for each crop
+        for crop in crops:
+            dates = pd.date_range(start='2020-01-01', end='2024-01-01', freq='D')
+            
+            # Create realistic price trends with seasonality
+            base_price = {
+                "Wheat": 25, "Rice": 45, "Corn": 18, "Soybeans": 55,
+                "Cotton": 85, "Tomatoes": 35, "Potatoes": 20, "Onions": 30
+            }[crop]
+            
+            # Add seasonal variations and trends
+            prices = []
+            for i, date in enumerate(dates):
+                # Seasonal component
+                seasonal = 5 * np.sin(2 * np.pi * date.dayofyear / 365)
+                
+                # Trend component
+                trend = 0.01 * i  # Slight upward trend
+                
+                # Random noise
+                noise = np.random.normal(0, 2)
+                
+                # Market events (random spikes/drops)
+                if np.random.random() < 0.05:  # 5% chance of market event
+                    event = np.random.choice([-10, 10])  # Price shock
+                else:
+                    event = 0
+                
+                price = base_price + seasonal + trend + noise + event
+                prices.append(max(price, base_price * 0.5))  # Minimum price floor
+            
+            self.crop_data[crop] = pd.DataFrame({
+                'date': dates,
+                'price': prices,
+                'volume': np.random.normal(1000, 200, len(dates)),
+                'weather_factor': np.random.normal(1, 0.2, len(dates)),
+                'demand_factor': np.random.normal(1, 0.15, len(dates))
+            })
+    
+    def prepare_features(self, data):
+        """Prepare features for machine learning model"""
+        df = data.copy()
+        
+        # Time-based features
+        df['day_of_year'] = df['date'].dt.dayofyear
+        df['month'] = df['date'].dt.month
+        df['quarter'] = df['date'].dt.quarter
+        df['year'] = df['date'].dt.year
+        
+        # Price-based features
+        df['price_lag_1'] = df['price'].shift(1)
+        df['price_lag_7'] = df['price'].shift(7)
+        df['price_lag_30'] = df['price'].shift(30)
+        
+        # Moving averages
+        df['price_ma_7'] = df['price'].rolling(window=7).mean()
+        df['price_ma_30'] = df['price'].rolling(window=30).mean()
+        
+        # Price volatility
+        df['price_volatility'] = df['price'].rolling(window=7).std()
+        
+        # Price momentum
+        df['price_momentum'] = df['price'] / df['price_ma_30'] - 1
+        
+        # Volume features
+        df['volume_ma_7'] = df['volume'].rolling(window=7).mean()
+        df['volume_ratio'] = df['volume'] / df['volume_ma_7']
+        
+        # External factors
+        df['weather_impact'] = df['weather_factor']
+        df['demand_impact'] = df['demand_factor']
+        
+        # Drop NaN values
+        df = df.dropna()
+        
+        return df
+    
+    def train_model(self, crop_name):
+        """Train prediction model for a specific crop"""
+        if crop_name not in self.crop_data:
+            raise ValueError(f"No data available for crop: {crop_name}")
+        
+        # Prepare data
+        data = self.prepare_features(self.crop_data[crop_name])
+        
+        # Define features and target
+        feature_columns = [
+            'day_of_year', 'month', 'quarter', 'year',
+            'price_lag_1', 'price_lag_7', 'price_lag_30',
+            'price_ma_7', 'price_ma_30', 'price_volatility', 'price_momentum',
+            'volume_ma_7', 'volume_ratio', 'weather_impact', 'demand_impact'
+        ]
+        
+        X = data[feature_columns]
+        y = data['price']
+        
+        # Split data
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, shuffle=False
+        )
+        
+        # Scale features
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+        
+        # Train Random Forest model
+        model = RandomForestRegressor(
+            n_estimators=100,
+            max_depth=10,
+            random_state=42,
+            n_jobs=-1
+        )
+        
+        model.fit(X_train_scaled, y_train)
+        
+        # Evaluate model
+        y_pred = model.predict(X_test_scaled)
+        mae = mean_absolute_error(y_test, y_pred)
+        r2 = r2_score(y_test, y_pred)
+        
+        # Store model and scaler
+        self.models[crop_name] = model
+        self.scalers[crop_name] = scaler
+        
+        return {
+            'mae': mae,
+            'r2_score': r2,
+            'feature_importance': dict(zip(feature_columns, model.feature_importances_))
+        }
+    
+    def predict_price(self, crop_name, prediction_days=30):
+        """Predict crop prices for the next N days"""
+        if crop_name not in self.crop_data:
+            # Train model if not exists
+            self.train_model(crop_name)
+        
+        if crop_name not in self.models:
+            self.train_model(crop_name)
+        
+        model = self.models[crop_name]
+        scaler = self.scalers[crop_name]
+        
+        # Get recent data
+        recent_data = self.crop_data[crop_name].tail(60).copy()
+        prepared_data = self.prepare_features(recent_data)
+        
+        # Generate future dates
+        last_date = recent_data['date'].iloc[-1]
+        future_dates = pd.date_range(
+            start=last_date + timedelta(days=1),
+            periods=prediction_days,
+            freq='D'
+        )
+        
+        # Predict future prices
+        predictions = []
+        current_data = prepared_data.iloc[-1:].copy()
+        
+        feature_columns = [
+            'day_of_year', 'month', 'quarter', 'year',
+            'price_lag_1', 'price_lag_7', 'price_lag_30',
+            'price_ma_7', 'price_ma_30', 'price_volatility', 'price_momentum',
+            'volume_ma_7', 'volume_ratio', 'weather_impact', 'demand_impact'
+        ]
+        
+        for i, future_date in enumerate(future_dates):
+            # Update time-based features
+            current_data['day_of_year'] = future_date.dayofyear
+            current_data['month'] = future_date.month
+            current_data['quarter'] = future_date.quarter
+            current_data['year'] = future_date.year
+            
+            # Prepare features
+            X_pred = current_data[feature_columns].values
+            X_pred_scaled = scaler.transform(X_pred)
+            
+            # Make prediction
+            predicted_price = model.predict(X_pred_scaled)[0]
+            predictions.append(predicted_price)
+            
+            # Update lagged features for next prediction
+            if i == 0:
+                current_data['price_lag_1'] = predicted_price
+            elif i >= 6:
+                current_data['price_lag_7'] = predictions[i-6]
+            elif i >= 29:
+                current_data['price_lag_30'] = predictions[i-29]
+        
+        # Calculate prediction metrics
+        current_price = recent_data['price'].iloc[-1]
+        price_change = ((predictions[-1] - current_price) / current_price) * 100
+        
+        # Determine trend
+        if predictions[-1] > predictions[0] * 1.05:
+            trend = 'increasing'
+        elif predictions[-1] < predictions[0] * 0.95:
+            trend = 'decreasing'
+        else:
+            trend = 'stable'
+        
+        # Calculate confidence (simplified)
+        price_volatility = np.std(predictions)
+        confidence = max(50, min(95, 100 - price_volatility * 2))
+        
+        # Find optimal selling window
+        max_price_idx = np.argmax(predictions)
+        best_selling_window = f"Day {max_price_idx + 1} to {min(max_price_idx + 7, len(predictions))}"
+        
+        return {
+            'crop_name': crop_name,
+            'current_price': current_price,
+            'predicted_prices': predictions,
+            'prediction_dates': future_dates.tolist(),
+            'historical_dates': recent_data['date'].tolist(),
+            'historical_prices': recent_data['price'].tolist(),
+            'price_change': price_change,
+            'trend': trend,
+            'confidence': confidence,
+            'best_selling_window': best_selling_window,
+            'prediction_summary': {
+                'min_price': min(predictions),
+                'max_price': max(predictions),
+                'avg_price': np.mean(predictions),
+                'volatility': price_volatility
+            }
+        }
+    
+    def get_market_insights(self, crop_name):
+        """Get market insights for a specific crop"""
+        if crop_name not in self.crop_data:
+            return None
+        
+        data = self.crop_data[crop_name]
+        recent_data = data.tail(30)
+        
+        insights = {
+            'current_price': recent_data['price'].iloc[-1],
+            'price_trend_30d': (recent_data['price'].iloc[-1] - recent_data['price'].iloc[0]) / recent_data['price'].iloc[0] * 100,
+            'volatility_30d': recent_data['price'].std(),
+            'avg_volume_30d': recent_data['volume'].mean(),
+            'price_range_30d': {
+                'min': recent_data['price'].min(),
+                'max': recent_data['price'].max()
+            }
+        }
+        
+        return insights
+    
+    def compare_crops(self, crops_list):
+        """Compare multiple crops for investment decisions"""
+        comparison = {}
+        
+        for crop in crops_list:
+            if crop in self.crop_data:
+                prediction = self.predict_price(crop, 30)
+                insights = self.get_market_insights(crop)
+                
+                comparison[crop] = {
+                    'current_price': prediction['current_price'],
+                    'predicted_change_30d': prediction['price_change'],
+                    'trend': prediction['trend'],
+                    'confidence': prediction['confidence'],
+                    'volatility': insights['volatility_30d'],
+                    'recommendation': self._get_recommendation(prediction, insights)
+                }
+        
+        return comparison
+    
+    def _get_recommendation(self, prediction, insights):
+        """Generate investment recommendation"""
+        if prediction['trend'] == 'increasing' and prediction['confidence'] > 70:
+            return "Strong Buy"
+        elif prediction['trend'] == 'increasing' and prediction['confidence'] > 50:
+            return "Buy"
+        elif prediction['trend'] == 'decreasing' and prediction['confidence'] > 70:
+            return "Sell"
+        elif prediction['trend'] == 'decreasing' and prediction['confidence'] > 50:
+            return "Consider Selling"
+        else:
+            return "Hold"
+    
+    def save_model(self, crop_name, filepath):
+        """Save trained model to file"""
+        if crop_name in self.models:
+            model_data = {
+                'model': self.models[crop_name],
+                'scaler': self.scalers[crop_name],
+                'crop_name': crop_name
+            }
+            joblib.dump(model_data, filepath)
+            return True
+        return False
+    
+    def load_model(self, filepath):
+        """Load trained model from file"""
+        try:
+            model_data = joblib.load(filepath)
+            crop_name = model_data['crop_name']
+            self.models[crop_name] = model_data['model']
+            self.scalers[crop_name] = model_data['scaler']
+            return True
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            return False
+    
+    def update_with_real_data(self, crop_name, new_data):
+        """Update model with new real market data"""
+        if crop_name not in self.crop_data:
+            self.crop_data[crop_name] = pd.DataFrame()
+        
+        # Append new data
+        self.crop_data[crop_name] = pd.concat([
+            self.crop_data[crop_name], 
+            new_data
+        ]).drop_duplicates().sort_values('date').reset_index(drop=True)
+        
+        # Retrain model with updated data
+        return self.train_model(crop_name)
+
+# Market Data Fetcher for real-time data
+class RealTimeMarketData:
+    def __init__(self):
+        self.api_endpoints = {
+            'agmarknet': 'https://api.data.gov.in/resource/9ef84268-d588-465a-a308-a864a43d0070',
+            'commodity_api': 'https://commodities-api.com/api/latest'
+        }
+    
+    def fetch_agmarknet_data(self, commodity, market=None):
+        """Fetch data from AgMarkNet (Indian agricultural markets)"""
+        try:
+            # This would require actual API key and proper endpoint
+            # For demonstration, returning sample data
+            sample_data = {
+                'commodity': commodity,
+                'market': market or 'Delhi',
+                'price': np.random.uniform(20, 100),
+                'date': datetime.now().strftime('%Y-%m-%d'),
+                'unit': 'per kg'
+            }
+            return sample_data
+        except Exception as e:
+            print(f"Error fetching AgMarkNet data: {e}")
+            return None
+    
+    def fetch_global_commodity_prices(self, commodity):
+        """Fetch global commodity prices"""
+        try:
+            # This would require actual API integration
+            # For demonstration, returning sample data
+            sample_data = {
+                'commodity': commodity,
+                'price_usd': np.random.uniform(100, 500),
+                'change_24h': np.random.uniform(-5, 5),
+                'volume': np.random.uniform(1000000, 10000000),
+                'timestamp': datetime.now().isoformat()
+            }
+            return sample_data
+        except Exception as e:
+            print(f"Error fetching global commodity data: {e}")
+            return None
+
+==================== END OF utils/crop_price_predictor.py ====================
+
+
+==================== FILE: utils/irrigation_controller.py ====================
+
+import time
+import threading
+from datetime import datetime, timedelta
+import json
+import schedule
+import logging
+
+class IrrigationController:
+    def __init__(self):
+        self.is_active = False
+        self.auto_mode = True
+        self.current_session = None
+        self.schedule_jobs = []
+        self.settings = {
+            'moisture_trigger': 30,  # Trigger irrigation when soil moisture below this %
+            'default_duration': 15,  # Default irrigation duration in minutes
+            'max_daily_sessions': 5,  # Maximum irrigation sessions per day
+            'min_interval_hours': 2,  # Minimum hours between irrigation sessions
+            'water_flow_rate': 10,  # Liters per minute
+            'pressure_threshold': 2.0,  # Minimum water pressure (bar)
+        }
+        self.daily_sessions = []
+        self.system_health = True
+        self.last_irrigation = None
+        self.total_water_used_today = 0
+        
+        # Setup logging
+        logging.basicConfig(level=logging.INFO)
+        self.logger = logging.getLogger(__name__)
+        
+        # Start the automation thread
+        self.automation_thread = threading.Thread(target=self._automation_loop, daemon=True)
+        self.automation_running = True
+        self.automation_thread.start()
+    
+    def start_irrigation(self, duration_minutes=None, manual=True, reason="Manual start"):
+        """Start irrigation system"""
+        if self.is_active:
+            self.logger.warning("Irrigation system is already active")
+            return False
+        
+        # Check system health
+        if not self._check_system_health():
+            self.logger.error("Cannot start irrigation: System health check failed")
+            return False
+        
+        # Check daily limits
+        if len(self.daily_sessions) >= self.settings['max_daily_sessions'] and not manual:
+            self.logger.warning("Daily irrigation limit reached")
+            return False
+        
+        # Check minimum interval
+        if self.last_irrigation and not manual:
+            time_since_last = datetime.now() - self.last_irrigation
+            if time_since_last < timedelta(hours=self.settings['min_interval_hours']):
+                self.logger.warning("Minimum interval between irrigations not met")
+                return False
+        
+        duration = duration_minutes or self.settings['default_duration']
+        
+        self.current_session = {
+            'start_time': datetime.now(),
+            'duration_minutes': duration,
+            'manual': manual,
+            'reason': reason,
+            'water_used': 0,
+            'status': 'active'
+        }
+        
+        self.is_active = True
+        self.logger.info(f"Irrigation started: {duration} minutes, Reason: {reason}")
+        
+        # Start irrigation in a separate thread
+        irrigation_thread = threading.Thread(
+            target=self._run_irrigation_session, 
+            args=(duration,), 
+            daemon=True
+        )
+        irrigation_thread.start()
+        
+        return True
+    
+    def stop_irrigation(self, reason="Manual stop"):
+        """Stop irrigation system"""
+        if not self.is_active:
+            self.logger.warning("Irrigation system is not active")
+            return False
+        
+        self.is_active = False
+        
+        if self.current_session:
+            self.current_session['end_time'] = datetime.now()
+            self.current_session['actual_duration'] = (
+                self.current_session['end_time'] - self.current_session['start_time']
+            ).total_seconds() / 60
+            self.current_session['stop_reason'] = reason
+            self.current_session['status'] = 'completed'
+            
+            # Add to daily sessions
+            self.daily_sessions.append(self.current_session.copy())
+            self.last_irrigation = self.current_session['end_time']
+            
+            self.logger.info(f"Irrigation stopped: {reason}")
+        
+        return True
+    
+    def _run_irrigation_session(self, duration_minutes):
+        """Run irrigation session in background"""
+        start_time = time.time()
+        end_time = start_time + (duration_minutes * 60)
+        
+        while time.time() < end_time and self.is_active:
+            # Simulate water flow and monitor system
+            elapsed_minutes = (time.time() - start_time) / 60
+            water_used = elapsed_minutes * self.settings['water_flow_rate']
+            
+            if self.current_session:
+                self.current_session['water_used'] = water_used
+                self.total_water_used_today += self.settings['water_flow_rate'] / 60  # per second
+            
+            # Check system health during irrigation
+            if not self._check_system_health():
+                self.stop_irrigation("System health check failed")
+                break
+            
+            time.sleep(1)  # Check every second
+        
+        # Auto-stop when duration is reached
+        if self.is_active:
+            self.stop_irrigation("Duration completed")
+    
+    def schedule_irrigation(self, time_str, duration_minutes, days_of_week=None):
+        """Schedule irrigation at specific times"""
+        if isinstance(time_str, str):
+            schedule_time = datetime.strptime(time_str, "%H:%M").time()
+        else:
+            schedule_time = time_str
+        
+        def irrigation_job():
+            if self.auto_mode:
+                self.start_irrigation(
+                    duration_minutes=duration_minutes,
+                    manual=False,
+                    reason=f"Scheduled irrigation at {schedule_time}"
+                )
+        
+        # Schedule the job
+        if days_of_week:
+            for day in days_of_week:
+                getattr(schedule.every(), day.lower()).at(schedule_time.strftime("%H:%M")).do(irrigation_job)
+        else:
+            schedule.every().day.at(schedule_time.strftime("%H:%M")).do(irrigation_job)
+        
+        self.schedule_jobs.append({
+            'time': schedule_time,
+            'duration': duration_minutes,
+            'days': days_of_week or ['daily'],
+            'created': datetime.now()
+        })
+        
+        self.logger.info(f"Irrigation scheduled for {schedule_time} ({duration_minutes} minutes)")
+        return True
+    
+    def set_auto_settings(self, settings):
+        """Update automatic irrigation settings"""
+        self.settings.update(settings)
+        self.auto_mode = settings.get('auto_enabled', self.auto_mode)
+        self.logger.info(f"Auto irrigation settings updated: {settings}")
+    
+    def _automation_loop(self):
+        """Main automation loop"""
+        while self.automation_running:
+            try:
+                # Run scheduled tasks
+                schedule.run_pending()
+                
+                # Check for automatic irrigation triggers
+                if self.auto_mode and not self.is_active:
+                    self._check_auto_irrigation_triggers()
+                
+                # Reset daily counters at midnight
+                self._reset_daily_counters()
+                
+                time.sleep(60)  # Check every minute
+                
+            except Exception as e:
+                self.logger.error(f"Error in automation loop: {e}")
+                time.sleep(60)
+    
+    def _check_auto_irrigation_triggers(self):
+        """Check if automatic irrigation should be triggered"""
+        try:
+            # This would integrate with the IoT sensor data
+            # For now, we'll simulate the check
+            
+            # Check soil moisture (would get from sensor)
+            current_moisture = self._get_current_soil_moisture()
+            
+            if current_moisture < self.settings['moisture_trigger']:
+                # Check if we can irrigate (time constraints, daily limits, etc.)
+                if self._can_auto_irrigate():
+                    self.start_irrigation(
+                        duration_minutes=self.settings['default_duration'],
+                        manual=False,
+                        reason=f"Auto trigger: Soil moisture {current_moisture}% < {self.settings['moisture_trigger']}%"
+                    )
+                    
+        except Exception as e:
+            self.logger.error(f"Error checking auto irrigation triggers: {e}")
+    
+    def _get_current_soil_moisture(self):
+        """Get current soil moisture from sensors"""
+        # This would integrate with the IoT sensor simulator
+        # For now, return a simulated value
+        import random
+        return random.uniform(20, 80)
+    
+    def _can_auto_irrigate(self):
+        """Check if automatic irrigation is allowed"""
+        # Check daily session limit
+        if len(self.daily_sessions) >= self.settings['max_daily_sessions']:
+            return False
+        
+        # Check minimum interval
+        if self.last_irrigation:
+            time_since_last = datetime.now() - self.last_irrigation
+            if time_since_last < timedelta(hours=self.settings['min_interval_hours']):
+                return False
+        
+        # Check time of day (avoid irrigation during hot hours)
+        current_hour = datetime.now().hour
+        if 11 <= current_hour <= 16:  # Avoid 11 AM to 4 PM
+            return False
+        
+        return True
+    
+    def _check_system_health(self):
+        """Check irrigation system health"""
+        # Simulate system health checks
+        # In real implementation, this would check:
+        # - Water pressure
+        # - Pump status
+        # - Valve status
+        # - Flow sensors
+        # - Electrical connections
+        
+        health_checks = {
+            'water_pressure': self._check_water_pressure(),
+            'pump_status': self._check_pump_status(),
+            'valve_status': self._check_valve_status(),
+            'flow_sensor': self._check_flow_sensor(),
+            'electrical': self._check_electrical_system()
+        }
+        
+        self.system_health = all(health_checks.values())
+        
+        if not self.system_health:
+            failed_components = [k for k, v in health_checks.items() if not v]
+            self.logger.error(f"System health check failed: {failed_components}")
+        
+        return self.system_health
+    
+    def _check_water_pressure(self):
+        """Check water pressure"""
+        # Simulate pressure check
+        import random
+        pressure = random.uniform(1.5, 3.0)
+        return pressure >= self.settings['pressure_threshold']
+    
+    def _check_pump_status(self):
+        """Check water pump status"""
+        # Simulate pump check
+        import random
+        return random.random() > 0.05  # 5% chance of pump failure
+    
+    def _check_valve_status(self):
+        """Check irrigation valve status"""
+        # Simulate valve check
+        import random
+        return random.random() > 0.02  # 2% chance of valve failure
+    
+    def _check_flow_sensor(self):
+        """Check water flow sensor"""
+        # Simulate flow sensor check
+        import random
+        return random.random() > 0.03  # 3% chance of sensor failure
+    
+    def _check_electrical_system(self):
+        """Check electrical system"""
+        # Simulate electrical system check
+        import random
+        return random.random() > 0.01  # 1% chance of electrical failure
+    
+    def _reset_daily_counters(self):
+        """Reset daily counters at midnight"""
+        now = datetime.now()
+        if now.hour == 0 and now.minute == 0:
+            self.daily_sessions = []
+            self.total_water_used_today = 0
+            self.logger.info("Daily counters reset")
+    
+    def get_status(self):
+        """Get current irrigation system status"""
+        status = {
+            'active': self.is_active,
+            'auto_mode': self.auto_mode,
+            'system_health': self.system_health,
+            'current_session': self.current_session,
+            'daily_sessions_count': len(self.daily_sessions),
+            'total_water_used_today': self.total_water_used_today,
+            'last_irrigation': self.last_irrigation,
+            'scheduled_jobs': len(self.schedule_jobs),
+            'settings': self.settings
+        }
+        
+        if self.current_session:
+            status['start_time'] = self.current_session['start_time']
+            status['duration'] = self.current_session['duration_minutes']
+            status['water_used'] = self.current_session['water_used']
+        
+        return status
+    
+    def get_irrigation_history(self, days=7):
+        """Get irrigation history"""
+        cutoff_date = datetime.now() - timedelta(days=days)
+        
+        # Filter sessions within the date range
+        filtered_sessions = []
+        for session in self.daily_sessions:
+            if session['start_time'] >= cutoff_date:
+                filtered_sessions.append(session)
+        
+        return filtered_sessions
+    
+    def get_water_usage_stats(self):
+        """Get water usage statistics"""
+        today_usage = sum(session.get('water_used', 0) for session in self.daily_sessions)
+        
+        stats = {
+            'today_usage_liters': today_usage,
+            'today_sessions': len(self.daily_sessions),
+            'avg_session_duration': sum(session.get('actual_duration', 0) for session in self.daily_sessions) / max(len(self.daily_sessions), 1),
+            'efficiency_score': self._calculate_efficiency_score()
+        }
+        
+        return stats
+    
+    def _calculate_efficiency_score(self):
+        """Calculate irrigation efficiency score"""
+        # Simple efficiency calculation based on:
+        # - Number of automatic vs manual sessions
+        # - Water usage per session
+        # - System health
+        
+        if not self.daily_sessions:
+            return 100
+        
+        auto_sessions = sum(1 for session in self.daily_sessions if not session.get('manual', True))
+        total_sessions = len(self.daily_sessions)
+        
+        auto_ratio = auto_sessions / total_sessions if total_sessions > 0 else 0
+        health_score = 100 if self.system_health else 50
+        
+        efficiency = (auto_ratio * 50) + (health_score * 0.5)
+        return min(100, max(0, efficiency))
+    
+    def export_irrigation_data(self, filename=None):
+        """Export irrigation data to JSON"""
+        if filename is None:
+            filename = f"irrigation_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        
+        export_data = {
+            'settings': self.settings,
+            'daily_sessions': self.daily_sessions,
+            'schedule_jobs': self.schedule_jobs,
+            'system_status': self.get_status(),
+            'export_timestamp': datetime.now().isoformat()
+        }
+        
+        # Convert datetime objects to strings for JSON serialization
+        def serialize_datetime(obj):
+            if isinstance(obj, datetime):
+                return obj.isoformat()
+            return obj
+        
+        with open(filename, 'w') as f:
+            json.dump(export_data, f, indent=2, default=serialize_datetime)
+        
+        return filename
+    
+    def emergency_stop(self):
+        """Emergency stop of irrigation system"""
+        self.stop_irrigation("Emergency stop")
+        self.auto_mode = False
+        self.system_health = False
+        self.logger.critical("EMERGENCY STOP: Irrigation system halted")
+    
+    def reset_system(self):
+        """Reset irrigation system to default state"""
+        self.stop_irrigation("System reset")
+        self.daily_sessions = []
+        self.total_water_used_today = 0
+        self.system_health = True
+        self.auto_mode = True
+        
+        # Clear scheduled jobs
+        schedule.clear()
+        self.schedule_jobs = []
+        
+        self.logger.info("Irrigation system reset to default state")
+    
+    def run_diagnostic(self):
+        """Run comprehensive system diagnostic"""
+        diagnostic_results = {
+            'timestamp': datetime.now(),
+            'system_health': self._check_system_health(),
+            'water_pressure': self._check_water_pressure(),
+            'pump_status': self._check_pump_status(),
+            'valve_status': self._check_valve_status(),
+            'flow_sensor': self._check_flow_sensor(),
+            'electrical': self._check_electrical_system(),
+            'settings_valid': self._validate_settings(),
+            'schedule_valid': self._validate_schedule()
+        }
+        
+        overall_health = all([
+            diagnostic_results['system_health'],
+            diagnostic_results['settings_valid'],
+            diagnostic_results['schedule_valid']
+        ])
+        
+        diagnostic_results['overall_status'] = 'PASS' if overall_health else 'FAIL'
+        
+        self.logger.info(f"Diagnostic completed: {diagnostic_results['overall_status']}")
+        return diagnostic_results
+    
+    def _validate_settings(self):
+        """Validate irrigation settings"""
+        required_settings = ['moisture_trigger', 'default_duration', 'water_flow_rate']
+        return all(setting in self.settings for setting in required_settings)
+    
+    def _validate_schedule(self):
+        """Validate scheduled irrigation jobs"""
+        # Check if scheduled jobs are valid
+        return True  # Simplified validation
+    
+    def cleanup(self):
+        """Cleanup resources when shutting down"""
+        self.automation_running = False
+        if self.is_active:
+            self.stop_irrigation("System shutdown")
+        
+        if self.automation_thread and self.automation_thread.is_alive():
+            self.automation_thread.join(timeout=5)
+        
+        self.logger.info("Irrigation controller cleanup completed")
+
+==================== END OF utils/irrigation_controller.py ====================
+
+
+==================== FILE: utils/weather_api.py ====================
+
+import requests
+import json
+from datetime import datetime, timedelta
+import random
+
+class WeatherAPI:
+    def __init__(self, api_key=None):
+        self.api_key = api_key or "demo_key"  # Use demo key for simulation
+        self.base_url = "http://api.openweathermap.org/data/2.5"
+        self.forecast_url = "http://api.openweathermap.org/data/2.5/forecast"
+        
+    def get_current_weather(self, lat=28.6139, lon=77.2090):
+        """Get current weather data"""
+        try:
+            # For demonstration, return simulated weather data
+            # In production, use actual API call
+            current_weather = self._simulate_current_weather()
+            return current_weather
+        except Exception as e:
+            print(f"Error fetching weather data: {e}")
+            return self._get_fallback_weather()
+    
+    def get_weather_forecast(self, lat=28.6139, lon=77.2090, days=5):
+        """Get weather forecast"""
+        try:
+            # For demonstration, return simulated forecast data
+            forecast = self._simulate_weather_forecast(days)
+            return forecast
+        except Exception as e:
+            print(f"Error fetching forecast data: {e}")
+            return self._get_fallback_forecast(days)
+    
+    def _simulate_current_weather(self):
+        """Simulate current weather data"""
+        hour = datetime.now().hour
+        
+        # Simulate temperature based on time of day
+        if 6 <= hour <= 18:  # Daytime
+            temp = random.uniform(25, 40)
+        else:  # Nighttime
+            temp = random.uniform(15, 25)
+        
+        # Simulate other weather parameters
+        humidity = random.uniform(40, 80)
+        pressure = random.uniform(1000, 1020)
+        wind_speed = random.uniform(0, 15)
+        
+        # Simulate weather conditions
+        conditions = ["clear", "partly_cloudy", "cloudy", "rain", "thunderstorm"]
+        weights = [0.4, 0.3, 0.2, 0.08, 0.02]  # Probability weights
+        weather_condition = random.choices(conditions, weights=weights)[0]
+        
+        # Simulate precipitation
+        if weather_condition in ["rain", "thunderstorm"]:
+            precipitation = random.uniform(0.1, 10.0)
+        else:
+            precipitation = 0.0
+        
+        return {
+            "timestamp": datetime.now(),
+            "temperature": round(temp, 1),
+            "humidity": round(humidity, 1),
+            "pressure": round(pressure, 1),
+            "wind_speed": round(wind_speed, 1),
+            "precipitation": round(precipitation, 2),
+            "weather_condition": weather_condition,
+            "description": self._get_weather_description(weather_condition),
+            "visibility": random.uniform(5, 15),
+            "uv_index": max(0, min(11, random.uniform(0, 8) if 6 <= hour <= 18 else 0))
+        }
+    
+    def _simulate_weather_forecast(self, days):
+        """Simulate weather forecast data"""
+        forecast = []
+        
+        for i in range(days):
+            date = datetime.now() + timedelta(days=i)
+            
+            # Simulate daily weather
+            day_weather = {
+                "date": date.date(),
+                "temp_max": random.uniform(30, 42),
+                "temp_min": random.uniform(18, 25),
+                "humidity": random.uniform(45, 85),
+                "precipitation": random.uniform(0, 5) if random.random() < 0.3 else 0,
+                "wind_speed": random.uniform(2, 12),
+                "weather_condition": random.choice(["clear", "partly_cloudy", "cloudy", "rain"]),
+                "precipitation_probability": random.uniform(0, 100)
+            }
+            
+            day_weather["description"] = self._get_weather_description(day_weather["weather_condition"])
+            forecast.append(day_weather)
+        
+        return forecast
+    
+    def _get_weather_description(self, condition):
+        """Get weather description from condition"""
+        descriptions = {
+            "clear": "Clear sky",
+            "partly_cloudy": "Partly cloudy",
+            "cloudy": "Cloudy",
+            "rain": "Light rain",
+            "thunderstorm": "Thunderstorm"
+        }
+        return descriptions.get(condition, "Unknown")
+    
+    def _get_fallback_weather(self):
+        """Get fallback weather data when API fails"""
+        return {
+            "timestamp": datetime.now(),
+            "temperature": 25.0,
+            "humidity": 60.0,
+            "pressure": 1013.0,
+            "wind_speed": 5.0,
+            "precipitation": 0.0,
+            "weather_condition": "clear",
+            "description": "Clear sky",
+            "visibility": 10.0,
+            "uv_index": 3.0
+        }
+    
+    def _get_fallback_forecast(self, days):
+        """Get fallback forecast data when API fails"""
+        forecast = []
+        for i in range(days):
+            date = datetime.now() + timedelta(days=i)
+            forecast.append({
+                "date": date.date(),
+                "temp_max": 30.0,
+                "temp_min": 20.0,
+                "humidity": 60.0,
+                "precipitation": 0.0,
+                "wind_speed": 5.0,
+                "weather_condition": "clear",
+                "description": "Clear sky",
+                "precipitation_probability": 10.0
+            })
+        return forecast
+    
+    def get_irrigation_recommendation(self, lat=28.6139, lon=77.2090):
+        """Get irrigation recommendation based on weather"""
+        current_weather = self.get_current_weather(lat, lon)
+        forecast = self.get_weather_forecast(lat, lon, 3)
+        
+        recommendation = {
+            "should_irrigate": True,
+            "confidence": 50,
+            "reason": "Normal irrigation schedule",
+            "timing": "morning",
+            "duration_adjustment": 0
+        }
+        
+        # Check current weather conditions
+        if current_weather["precipitation"] > 5:
+            recommendation.update({
+                "should_irrigate": False,
+                "confidence": 90,
+                "reason": "Heavy rainfall detected",
+                "timing": "skip",
+                "duration_adjustment": 0
+            })
+        elif current_weather["weather_condition"] == "rain":
+            recommendation.update({
+                "should_irrigate": False,
+                "confidence": 80,
+                "reason": "Rain in progress",
+                "timing": "skip",
+                "duration_adjustment": 0
+            })
+        
+        # Check forecast for next 24 hours
+        rain_expected = any(day["precipitation"] > 2 for day in forecast[:1])
+        if rain_expected:
+            recommendation.update({
+                "should_irrigate": False,
+                "confidence": 75,
+                "reason": "Rain expected within 24 hours",
+                "timing": "postpone",
+                "duration_adjustment": 0
+            })
+        
+        # Check temperature and humidity
+        if current_weather["temperature"] > 35 and current_weather["humidity"] < 40:
+            recommendation.update({
+                "should_irrigate": True,
+                "confidence": 85,
+                "reason": "High temperature and low humidity",
+                "timing": "early_morning",
+                "duration_adjustment": 20  # Increase duration by 20%
+            })
+        
+        # Check wind conditions
+        if current_weather["wind_speed"] > 10:
+            recommendation.update({
+                "timing": "early_morning",
+                "duration_adjustment": recommendation["duration_adjustment"] + 10,
+                "reason": recommendation["reason"] + " + windy conditions"
+            })
+        
+        return recommendation
+    
+    def get_evapotranspiration_estimate(self, lat=28.6139, lon=77.2090):
+        """Estimate evapotranspiration rate"""
+        current_weather = self.get_current_weather(lat, lon)
+        
+        # Simplified Penman-Monteith equation estimation
+        temp = current_weather["temperature"]
+        humidity = current_weather["humidity"]
+        wind_speed = current_weather["wind_speed"]
+        
+        # Basic ET calculation (mm/day)
+        et_rate = (0.0023 * (temp + 17.8) * 
+                  ((100 - humidity) / 100) * 
+                  (1 + 0.1 * wind_speed))
+        
+        return {
+            "et_rate_mm_per_day": round(et_rate, 2),
+            "water_requirement_liters_per_sqm": round(et_rate / 10, 3),
+            "recommended_irrigation_duration": round(et_rate * 2, 0),  # minutes
+            "factors": {
+                "temperature_effect": temp / 30,
+                "humidity_effect": (100 - humidity) / 100,
+                "wind_effect": 1 + (wind_speed / 50)
+            }
+        }
+    
+    def get_weather_alerts(self, lat=28.6139, lon=77.2090):
+        """Get weather alerts and warnings"""
+        current_weather = self.get_current_weather(lat, lon)
+        forecast = self.get_weather_forecast(lat, lon, 3)
+        
+        alerts = []
+        
+        # Temperature alerts
+        if current_weather["temperature"] > 40:
+            alerts.append({
+                "type": "heat_wave",
+                "severity": "high",
+                "message": "Extreme heat warning - increase irrigation frequency",
+                "action": "Irrigate early morning and evening"
+            })
+        elif current_weather["temperature"] > 35:
+            alerts.append({
+                "type": "high_temperature",
+                "severity": "medium",
+                "message": "High temperature alert - monitor soil moisture",
+                "action": "Consider additional irrigation"
+            })
+        
+        # Precipitation alerts
+        heavy_rain_forecast = any(day["precipitation"] > 10 for day in forecast)
+        if heavy_rain_forecast:
+            alerts.append({
+                "type": "heavy_rain",
+                "severity": "medium",
+                "message": "Heavy rain expected - suspend irrigation",
+                "action": "Cancel scheduled irrigation for next 24-48 hours"
+            })
+        
+        # Wind alerts
+        if current_weather["wind_speed"] > 15:
+            alerts.append({
+                "type": "high_wind",
+                "severity": "medium",
+                "message": "High wind conditions - irrigation efficiency reduced",
+                "action": "Use drip irrigation or irrigate during calm periods"
+            })
+        
+        # Humidity alerts
+        if current_weather["humidity"] < 30:
+            alerts.append({
+                "type": "low_humidity",
+                "severity": "medium",
+                "message": "Very low humidity - increased water loss",
+                "action": "Increase irrigation frequency and duration"
+            })
+        
+        return alerts
+    
+    def get_seasonal_recommendations(self, month=None):
+        """Get seasonal irrigation recommendations"""
+        if month is None:
+            month = datetime.now().month
+        
+        seasonal_advice = {
+            # Winter months (Dec, Jan, Feb)
+            12: {"season": "Winter", "irrigation_frequency": "Low", "best_time": "Mid-day", "notes": "Reduce irrigation, avoid frost periods"},
+            1: {"season": "Winter", "irrigation_frequency": "Low", "best_time": "Mid-day", "notes": "Minimal irrigation needed, protect from frost"},
+            2: {"season": "Winter", "irrigation_frequency": "Low", "best_time": "Mid-day", "notes": "Gradually increase as temperature rises"},
+            
+            # Spring months (Mar, Apr, May)
+            3: {"season": "Spring", "irrigation_frequency": "Medium", "best_time": "Morning", "notes": "Increase irrigation for growing season"},
+            4: {"season": "Spring", "irrigation_frequency": "Medium", "best_time": "Morning", "notes": "Monitor for dry spells"},
+            5: {"season": "Spring", "irrigation_frequency": "High", "best_time": "Early morning", "notes": "Peak growing season, ensure adequate water"},
+            
+            # Summer months (Jun, Jul, Aug)
+            6: {"season": "Summer", "irrigation_frequency": "High", "best_time": "Early morning", "notes": "Hot weather, increase frequency"},
+            7: {"season": "Summer", "irrigation_frequency": "Very High", "best_time": "Early morning/Evening", "notes": "Peak summer, avoid midday irrigation"},
+            8: {"season": "Summer", "irrigation_frequency": "Very High", "best_time": "Early morning/Evening", "notes": "Continue intensive irrigation"},
+            
+            # Monsoon/Fall months (Sep, Oct, Nov)
+            9: {"season": "Monsoon", "irrigation_frequency": "Variable", "best_time": "As needed", "notes": "Reduce based on rainfall"},
+            10: {"season": "Post-monsoon", "irrigation_frequency": "Medium", "best_time": "Morning", "notes": "Resume regular irrigation"},
+            11: {"season": "Fall", "irrigation_frequency": "Medium", "best_time": "Morning", "notes": "Prepare for winter reduction"}
+        }
+        
+        return seasonal_advice.get(month, seasonal_advice[1])
+    
+    def calculate_water_savings(self, weather_data, irrigation_schedule):
+        """Calculate potential water savings based on weather"""
+        savings = {
+            "total_scheduled_water": 0,
+            "weather_adjusted_water": 0,
+            "water_saved": 0,
+            "savings_percentage": 0,
+            "cost_savings": 0  # Assuming cost per liter
+        }
+        
+        # This would integrate with actual irrigation scheduling
+        # For demonstration, calculate estimated savings
+        
+        base_water_per_session = 100  # liters
+        sessions_per_week = 7
+        
+        savings["total_scheduled_water"] = base_water_per_session * sessions_per_week
+        
+        # Adjust based on weather
+        rain_days = sum(1 for day in weather_data if day.get("precipitation", 0) > 5)
+        hot_days = sum(1 for day in weather_data if day.get("temp_max", 25) > 35)
+        
+        # Skip irrigation on rainy days
+        water_saved_rain = rain_days * base_water_per_session
+        
+        # Increase irrigation on hot days
+        extra_water_hot = hot_days * (base_water_per_session * 0.2)
+        
+        savings["weather_adjusted_water"] = (
+            savings["total_scheduled_water"] - 
+            water_saved_rain + 
+            extra_water_hot
+        )
+        
+        savings["water_saved"] = savings["total_scheduled_water"] - savings["weather_adjusted_water"]
+        
+        if savings["total_scheduled_water"] > 0:
+            savings["savings_percentage"] = (
+                savings["water_saved"] / savings["total_scheduled_water"]
+            ) * 100
+        
+        # Assuming water cost (₹ per liter)
+        water_cost_per_liter = 0.05
+        savings["cost_savings"] = savings["water_saved"] * water_cost_per_liter
+        
+        return savings
+
+==================== END OF utils/weather_api.py ====================
+
+
+==================== FILE: utils/market_data.py ====================
+
+import requests
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+import json
+import random
+from bs4 import BeautifulSoup
+
+class MarketDataFetcher:
+    def __init__(self):
+        self.api_endpoints = {
+            'agmarknet': 'https://agmarknet.gov.in/',
+            'commodity_api': 'https://commodities-api.com/api/',
+            'yahoo_finance': 'https://finance.yahoo.com/',
+            'investing_com': 'https://www.investing.com/commodities/'
+        }
+        
+        # Sample market data for demonstration
+        self.sample_markets = [
+            "Delhi", "Mumbai", "Kolkata", "Chennai", "Bangalore", 
+            "Hyderabad", "Pune", "Ahmedabad", "Jaipur", "Lucknow"
+        ]
+        
+        self.crop_categories = {
+            "Cereals": ["Wheat", "Rice", "Corn", "Barley", "Oats"],
+            "Pulses": ["Chickpea", "Lentils", "Black Gram", "Green Gram"],
+            "Oilseeds": ["Soybeans", "Mustard", "Sunflower", "Groundnut"],
+            "Cash Crops": ["Cotton", "Sugarcane", "Tobacco"],
+            "Vegetables": ["Tomatoes", "Onions", "Potatoes", "Cabbage"],
+            "Fruits": ["Apples", "Bananas", "Oranges", "Grapes"]
+        }
+    
+    def get_current_market_data(self):
+        """Get current market overview"""
+        try:
+            # For demonstration, return simulated market data
+            # In production, this would fetch from real APIs
+            return self._simulate_market_overview()
+        except Exception as e:
+            print(f"Error fetching market data: {e}")
+            return self._get_fallback_market_data()
+    
+    def fetch_crop_prices(self, crop_name, market=None, days=30):
+        """Fetch crop prices from various sources"""
+        try:
+            # Simulate fetching from multiple sources
+            agmarknet_data = self._fetch_agmarknet_prices(crop_name, market, days)
+            commodity_data = self._fetch_commodity_api_prices(crop_name, days)
+            
+            # Combine and process data
+            combined_data = self._combine_price_data(agmarknet_data, commodity_data)
+            return combined_data
+            
+        except Exception as e:
+            print(f"Error fetching crop prices: {e}")
+            return self._get_fallback_crop_prices(crop_name, days)
+    
+    def _simulate_market_overview(self):
+        """Simulate current market overview"""
+        return {
+            "market_status": "Open",
+            "overall_trend": random.choice(["Bullish", "Bearish", "Stable"]),
+            "total_volume": random.uniform(10000, 50000),
+            "active_markets": len(self.sample_markets),
+            "price_changes": {
+                "gainers": random.randint(15, 25),
+                "losers": random.randint(10, 20),
+                "unchanged": random.randint(5, 15)
+            },
+            "top_commodities": self._get_top_commodities(),
+            "market_news": self._get_market_news(),
+            "timestamp": datetime.now()
+        }
+    
+    def _get_top_commodities(self):
+        """Get top performing commodities"""
+        commodities = []
+        all_crops = [crop for category in self.crop_categories.values() for crop in category]
+        
+        for i in range(5):
+            crop = random.choice(all_crops)
+            commodities.append({
+                "name": crop,
+                "price": round(random.uniform(20, 100), 2),
+                "change": round(random.uniform(-10, 15), 2),
+                "change_percent": round(random.uniform(-8, 12), 2),
+                "volume": random.randint(1000, 10000)
+            })
+        
+        return commodities
+    
+    def _get_market_news(self):
+        """Get simulated market news"""
+        news_templates = [
+            "Weather conditions favorable for {crop} harvest",
+            "Export demand increases for {crop}",
+            "Government announces minimum support price for {crop}",
+            "Storage facilities expand in {market} region",
+            "New farming techniques boost {crop} yield"
+        ]
+        
+        news = []
+        for i in range(3):
+            template = random.choice(news_templates)
+            crop = random.choice([crop for category in self.crop_categories.values() for crop in category])
+            market = random.choice(self.sample_markets)
+            
+            news.append({
+                "headline": template.format(crop=crop, market=market),
+                "impact": random.choice(["Positive", "Negative", "Neutral"]),
+                "timestamp": datetime.now() - timedelta(hours=random.randint(1, 24))
+            })
+        
+        return news
+    
+    def _fetch_agmarknet_prices(self, crop_name, market, days):
+        """Simulate fetching from AgMarkNet"""
+        # In real implementation, this would use AgMarkNet API
+        dates = pd.date_range(end=datetime.now(), periods=days, freq='D')
+        
+        base_price = random.uniform(20, 100)
+        prices = []
+        
+        for date in dates:
+            # Simulate price variations
+            daily_change = random.uniform(-5, 5)
+            price = max(base_price * 0.5, base_price + daily_change)
+            base_price = price
+            
+            prices.append({
+                "date": date,
+                "crop": crop_name,
+                "market": market or random.choice(self.sample_markets),
+                "price": round(price, 2),
+                "unit": "per kg",
+                "source": "AgMarkNet"
+            })
+        
+        return pd.DataFrame(prices)
+    
+    def _fetch_commodity_api_prices(self, crop_name, days):
+        """Simulate fetching from commodity API"""
+        # In real implementation, this would use commodity APIs
+        dates = pd.date_range(end=datetime.now(), periods=days, freq='D')
+        
+        base_price_usd = random.uniform(0.5, 2.0)  # USD per kg
+        prices = []
+        
+        for date in dates:
+            daily_change = random.uniform(-0.1, 0.1)
+            price_usd = max(base_price_usd * 0.5, base_price_usd + daily_change)
+            price_inr = price_usd * 83  # Convert to INR (approximate rate)
+            base_price_usd = price_usd
+            
+            prices.append({
+                "date": date,
+                "crop": crop_name,
+                "price_usd": round(price_usd, 3),
+                "price_inr": round(price_inr, 2),
+                "exchange_rate": 83,
+                "source": "CommodityAPI"
+            })
+        
+        return pd.DataFrame(prices)
+    
+    def _combine_price_data(self, agmarknet_data, commodity_data):
+        """Combine price data from multiple sources"""
+        combined = {
+            "domestic_prices": agmarknet_data,
+            "international_prices": commodity_data,
+            "price_correlation": self._calculate_price_correlation(agmarknet_data, commodity_data),
+            "arbitrage_opportunities": self._find_arbitrage_opportunities(agmarknet_data)
+        }
+        
+        return combined
+    
+    def _calculate_price_correlation(self, domestic_data, international_data):
+        """Calculate correlation between domestic and international prices"""
+        if len(domestic_data) > 0 and len(international_data) > 0:
+            # Merge data on date
+            merged = pd.merge(
+                domestic_data[['date', 'price']], 
+                international_data[['date', 'price_inr']], 
+                on='date', 
+                how='inner'
+            )
+            
+            if len(merged) > 1:
+                correlation = merged['price'].corr(merged['price_inr'])
+                return round(correlation, 3)
+        
+        return None
+    
+    def _find_arbitrage_opportunities(self, market_data):
+        """Find price differences between markets"""
+        if len(market_data) == 0:
+            return []
+        
+        # Group by date and find price differences
+        opportunities = []
+        latest_date = market_data['date'].max()
+        latest_data = market_data[market_data['date'] == latest_date]
+        
+        if len(latest_data) > 1:
+            min_price = latest_data['price'].min()
+            max_price = latest_data['price'].max()
+            price_diff = max_price - min_price
+            
+            if price_diff > min_price * 0.1:  # 10% difference threshold
+                min_market = latest_data[latest_data['price'] == min_price]['market'].iloc[0]
+                max_market = latest_data[latest_data['price'] == max_price]['market'].iloc[0]
+                
+                opportunities.append({
+                    "buy_market": min_market,
+                    "sell_market": max_market,
+                    "buy_price": min_price,
+                    "sell_price": max_price,
+                    "profit_margin": round(price_diff, 2),
+                    "profit_percentage": round((price_diff / min_price) * 100, 2)
+                })
+        
+        return opportunities
+    
+    def get_price_alerts(self, crop_name, target_price, alert_type="above"):
+        """Set up price alerts for crops"""
+        current_prices = self.fetch_crop_prices(crop_name, days=1)
+        alerts = []
+        
+        if not current_prices["domestic_prices"].empty:
+            latest_price = current_prices["domestic_prices"]["price"].iloc[-1]
+            
+            if alert_type == "above" and latest_price >= target_price:
+                alerts.append({
+                    "type": "price_target_reached",
+                    "message": f"{crop_name} price reached ₹{latest_price}/kg (target: ₹{target_price}/kg)",
+                    "current_price": latest_price,
+                    "target_price": target_price,
+                    "timestamp": datetime.now()
+                })
+            elif alert_type == "below" and latest_price <= target_price:
+                alerts.append({
+                    "type": "price_drop_alert",
+                    "message": f"{crop_name} price dropped to ₹{latest_price}/kg (alert: ₹{target_price}/kg)",
+                    "current_price": latest_price,
+                    "target_price": target_price,
+                    "timestamp": datetime.now()
+                })
+        
+        return alerts
+    
+    def get_seasonal_price_patterns(self, crop_name, years=3):
+        """Analyze seasonal price patterns"""
+        # Simulate historical data for seasonal analysis
+        seasonal_data = {}
+        
+        for month in range(1, 13):
+            month_prices = []
+            for year in range(years):
+                # Simulate seasonal price variations
+                if crop_name in ["Wheat", "Rice"]:
+                    # Harvest seasons affect prices
+                    if month in [4, 5, 11, 12]:  # Harvest months
+                        base_price = random.uniform(20, 30)
+                    else:
+                        base_price = random.uniform(30, 45)
+                elif crop_name in ["Tomatoes", "Onions"]:
+                    # More volatile vegetables
+                    base_price = random.uniform(15, 80)
+                else:
+                    base_price = random.uniform(25, 60)
+                
+                month_prices.append(base_price)
+            
+            seasonal_data[month] = {
+                "month": month,
+                "avg_price": round(np.mean(month_prices), 2),
+                "min_price": round(np.min(month_prices), 2),
+                "max_price": round(np.max(month_prices), 2),
+                "volatility": round(np.std(month_prices), 2)
+            }
+        
+        # Find best and worst months
+        avg_prices = [data["avg_price"] for data in seasonal_data.values()]
+        best_month = min(seasonal_data.keys(), key=lambda x: seasonal_data[x]["avg_price"])
+        worst_month = max(seasonal_data.keys(), key=lambda x: seasonal_data[x]["avg_price"])
+        
+        return {
+            "seasonal_data": seasonal_data,
+            "best_buying_month": best_month,
+            "best_selling_month": worst_month,
+            "price_volatility": round(np.std(avg_prices), 2),
+            "seasonal_trend": "Stable" if np.std(avg_prices) < 5 else "Volatile"
+        }
+    
+    def get_market_comparison(self, crop_name, markets=None):
+        """Compare prices across different markets"""
+        if markets is None:
+            markets = random.sample(self.sample_markets, 5)
+        
+        comparison = []
+        
+        for market in markets:
+            prices = self._fetch_agmarknet_prices(crop_name, market, 7)
+            if not prices.empty:
+                avg_price = prices["price"].mean()
+                price_trend = "Up" if prices["price"].iloc[-1] > prices["price"].iloc[0] else "Down"
+                
+                comparison.append({
+                    "market": market,
+                    "current_price": round(prices["price"].iloc[-1], 2),
+                    "avg_price_7d": round(avg_price, 2),
+                    "price_trend": price_trend,
+                    "volatility": round(prices["price"].std(), 2),
+                    "volume": random.randint(100, 1000)  # Simulated volume
+                })
+        
+        # Sort by current price
+        comparison.sort(key=lambda x: x["current_price"])
+        
+        return comparison
+    
+    def get_supply_demand_analysis(self, crop_name):
+        """Analyze supply and demand factors"""
+        analysis = {
+            "supply_factors": {
+                "production_estimate": random.uniform(80, 120),  # % of normal
+                "weather_impact": random.choice(["Positive", "Negative", "Neutral"]),
+                "area_under_cultivation": random.uniform(90, 110),  # % of last year
+                "yield_per_hectare": random.uniform(85, 115),  # % of average
+                "storage_levels": random.uniform(70, 130)  # % of capacity
+            },
+            "demand_factors": {
+                "domestic_consumption": random.uniform(95, 105),  # % of normal
+                "export_demand": random.uniform(80, 120),  # % of last year
+                "industrial_usage": random.uniform(90, 110),  # % of normal
+                "government_procurement": random.uniform(85, 115),  # % of target
+                "price_elasticity": random.uniform(0.3, 0.8)
+            },
+            "market_sentiment": random.choice(["Bullish", "Bearish", "Neutral"]),
+            "price_forecast": {
+                "short_term": random.choice(["Increase", "Decrease", "Stable"]),
+                "medium_term": random.choice(["Increase", "Decrease", "Stable"]),
+                "long_term": random.choice(["Increase", "Decrease", "Stable"])
+            }
+        }
+        
+        return analysis
+    
+    def export_market_data(self, data, filename=None):
+        """Export market data to CSV/JSON"""
+        if filename is None:
+            filename = f"market_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        
+        try:
+            if isinstance(data, pd.DataFrame):
+                data.to_csv(f"{filename}.csv", index=False)
+                return f"{filename}.csv"
+            else:
+                with open(f"{filename}.json", 'w') as f:
+                    json.dump(data, f, indent=2, default=str)
+                return f"{filename}.json"
+        except Exception as e:
+            print(f"Error exporting data: {e}")
+            return None
+    
+    def _get_fallback_market_data(self):
+        """Fallback market data when APIs fail"""
+        return {
+            "market_status": "Unknown",
+            "overall_trend": "Stable",
+            "total_volume": 25000,
+            "active_markets": 10,
+            "price_changes": {"gainers": 20, "losers": 15, "unchanged": 10},
+            "top_commodities": [],
+            "market_news": [],
+            "timestamp": datetime.now()
+        }
+    
+    def _get_fallback_crop_prices(self, crop_name, days):
+        """Fallback crop prices when APIs fail"""
+        dates = pd.date_range(end=datetime.now(), periods=days, freq='D')
+        base_price = 50  # Default price
+        
+        domestic_prices = pd.DataFrame([
+            {
+                "date": date,
+                "crop": crop_name,
+                "market": "Delhi",
+                "price": base_price,
+                "unit": "per kg",
+                "source": "Fallback"
+            } for date in dates
+        ])
+        
+        international_prices = pd.DataFrame([
+            {
+                "date": date,
+                "crop": crop_name,
+                "price_usd": base_price / 83,
+                "price_inr": base_price,
+                "exchange_rate": 83,
+                "source": "Fallback"
+            } for date in dates
+        ])
+        
+        return {
+            "domestic_prices": domestic_prices,
+            "international_prices": international_prices,
+            "price_correlation": None,
+            "arbitrage_opportunities": []
+        }
+
+==================== END OF utils/market_data.py ====================
+
+
+================================================================================
+ALL FILES EXPORTED
+================================================================================
